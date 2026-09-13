@@ -12,6 +12,8 @@ import '../widgets/engine_results_widget.dart';
 import '../widgets/gearshield_mic_widget.dart';
 import '../widgets/spectrogram_viewer_widget.dart';
 import '../widgets/gemini_ai_explanation_widget.dart';
+import '../widgets/audit_stats_widget.dart';
+import '../services/gemini_forensic_service.dart';
 import '../services/hive_service.dart';
 import 'gearshield_login_screen.dart';
 
@@ -39,6 +41,11 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
 
   int _selectedNavIndex = 0;
   int _selectedFilterIndex = 0;
+
+  // GenUI State variables
+  final List<String> _genUiWidgetsStack = [];
+  final TextEditingController _genUiPromptController = TextEditingController();
+  bool _isGenUiProcessing = false;
 
   // State mockup variables for settings
   bool _autoPdfReport = true;
@@ -112,6 +119,7 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
 
   @override
   void dispose() {
+    _genUiPromptController.dispose();
     _pulseController.dispose();
     _audioRecorder.dispose();
     super.dispose();
@@ -488,80 +496,342 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     );
   }
 
+  GearShieldResult get _activeMetricsResult {
+    return _latestResult ??
+        GearShieldResult(
+          audioPath: 'ultimo_audio_demo.wav',
+          label: 'Voz Orgánica Humana (Último Audio)',
+          riskZone: 'ZONA_VERDE',
+          actionRequired: 'APROBADO_ACCESO_CONCEDIDO',
+          overallRiskAi: 12.5,
+          maxAiProb: 15.2,
+          avgAiProb: 10.1,
+          aiDetectedIntervals: const [],
+          timeline: const [],
+        );
+  }
+
   // ==========================================
-  // PANTALLA 2: MÉTRICAS (Pergamino de Widgets Forenses)
+  // PANTALLA 2: MÉTRICAS (GenUI Orquestado por Gemini API)
   // ==========================================
   Widget _buildMetricsTab() {
+    final activeResult = _activeMetricsResult;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildTopHeader(subtitle: 'Métricas Forenses & Resultados'),
+        _buildTopHeader(subtitle: 'Métricas Forenses & GenUI Orquestado'),
         const SizedBox(height: 16),
-        if (_latestResult != null) ...[
-          AiProbabilityWidget(result: _latestResult!),
-          const SizedBox(height: 14),
-          GeminiAiExplanationWidget(result: _latestResult!),
-          const SizedBox(height: 14),
-          SpectrogramViewerWidget(result: _latestResult!),
-          const SizedBox(height: 14),
-          EngineResultsWidget(result: _latestResult!),
-          const SizedBox(height: 24),
-        ] else ...[
+
+        // 1. WIDGET ÚNICO INICIAL: Probabilidad Orgánica del Último Audio (Solicitado por el usuario)
+        AiProbabilityWidget(result: activeResult),
+        const SizedBox(height: 18),
+
+        // 2. PANEL DE ORQUESTACIÓN DE INTENCIÓN DE GEMINI API (3 Botones + Chatbot Prompt)
+        _buildGenUiOrchestrationPanel(),
+        const SizedBox(height: 18),
+
+        // 3. RENDERIZADO DINÁMICO HACIA ABAJO (Stack de Widgets Generados por Gemini)
+        if (_genUiWidgetsStack.isEmpty)
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(24),
-            decoration: VocalisTheme.glassCardDecoration(borderRadius: 16),
-            child: Column(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: VocalisTheme.glassCardDecoration(borderRadius: 14),
+            child: Row(
+              children: const [
+                Icon(Icons.info_outline_rounded, color: VocalisTheme.primaryContainer, size: 20),
+                SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Toca uno de los 3 casos arriba o escribe una duda para que Gemini orqueste y haga aparecer el widget dinámico hacia abajo.',
+                    style: TextStyle(fontSize: 11, color: VocalisTheme.textSecondary),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          ..._genUiWidgetsStack.asMap().entries.map((entry) {
+            final index = entry.key;
+            final intent = entry.value;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 16.0),
+              child: _buildGenUiWidgetByIntent(intent, activeResult, index),
+            );
+          }),
+      ],
+    );
+  }
+
+  Widget _buildGenUiOrchestrationPanel() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: VocalisTheme.glassCardDecoration(
+        borderColor: VocalisTheme.primaryContainer.withValues(alpha: 0.4),
+        borderRadius: 20,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: const [
+                  Icon(Icons.auto_awesome, color: VocalisTheme.primaryContainer, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Orquestador GenUI de Gemini API',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: VocalisTheme.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+              if (_genUiWidgetsStack.isNotEmpty)
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _genUiWidgetsStack.clear();
+                    });
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: VocalisTheme.error.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.clear_all_rounded, size: 14, color: VocalisTheme.error),
+                        SizedBox(width: 4),
+                        Text(
+                          'Limpiar Vista',
+                          style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: VocalisTheme.error),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Selecciona uno de los 3 casos simples para generar su widget hacia abajo:',
+            style: TextStyle(fontSize: 11, color: VocalisTheme.textSecondary),
+          ),
+          const SizedBox(height: 12),
+
+          // 3 Botones de Selección Rápida (Los 3 casos pedidos por el usuario)
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
               children: [
-                const Icon(
-                  Icons.analytics_outlined,
-                  size: 48,
-                  color: VocalisTheme.primaryContainer,
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'No hay análisis registrado en esta sesión',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    color: VocalisTheme.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'Graba una muestra de voz o sube un archivo de audio en la pestaña "Voz" para visualizar el desglose biofísico y pergamino de métricas aquí.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: VocalisTheme.textSecondary,
-                  ),
-                ),
-                const SizedBox(height: 16),
+                // CASO 1
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: VocalisTheme.primaryContainer,
                     foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
-                  onPressed: () {
-                    setState(() => _selectedNavIndex = 0);
-                  },
-                  icon: const Icon(Icons.mic_rounded, size: 18),
+                  onPressed: () => _handleGenUiChoice('EXPLANATION'),
+                  icon: const Icon(Icons.saved_search_rounded, size: 16),
                   label: const Text(
-                    'Ir a Grabación de Voz',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                    'Caso 1: ¿Qué delató al último audio?',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(width: 8),
+
+                // CASO 2
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: VocalisTheme.primaryContainer,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  onPressed: () => _handleGenUiChoice('SPECTROGRAM'),
+                  icon: const Icon(Icons.graphic_eq_rounded, size: 16),
+                  label: const Text(
+                    'Caso 2: Ver Espectrograma',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(width: 8),
+
+                // CASO 3
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: VocalisTheme.primaryContainer,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  onPressed: () => _handleGenUiChoice('AUDIT_STATS'),
+                  icon: const Icon(Icons.assessment_outlined, size: 16),
+                  label: const Text(
+                    'Caso 3: Estado de Reportes',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 24),
+
+          const SizedBox(height: 12),
+
+          // Campo de Entrada para Libre Consulta Conversacional GenUI
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _genUiPromptController,
+                  decoration: InputDecoration(
+                    hintText: 'Pregunta a Gemini GenUI (ej. "Muéstrame el espectrograma")...',
+                    hintStyle: const TextStyle(fontSize: 11, color: VocalisTheme.textTertiary),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: VocalisTheme.glassBorderSubtle),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: VocalisTheme.primaryContainer),
+                    ),
+                  ),
+                  onSubmitted: (val) => _sendGenUiQuery(val),
+                ),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: () => _sendGenUiQuery(_genUiPromptController.text),
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: VocalisTheme.textPrimary,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: _isGenUiProcessing
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.send_rounded, color: Colors.white, size: 16),
+                ),
+              ),
+            ],
+          ),
         ],
-        _buildRecentExpensesSection(),
+      ),
+    );
+  }
+
+  void _handleGenUiChoice(String intent) {
+    setState(() {
+      _genUiWidgetsStack.add(intent);
+    });
+  }
+
+  void _sendGenUiQuery(String text) async {
+    final query = text.trim();
+    if (query.isEmpty) return;
+
+    _genUiPromptController.clear();
+    setState(() => _isGenUiProcessing = true);
+
+    final res = await GeminiForensicService.resolveGenUiIntent(query);
+    final String intent = res['intent'] ?? 'EXPLANATION';
+
+    if (mounted) {
+      setState(() {
+        _isGenUiProcessing = false;
+        _genUiWidgetsStack.add(intent);
+      });
+    }
+  }
+
+  Widget _buildGenUiWidgetByIntent(String intent, GearShieldResult result, int index) {
+    Widget content;
+    String labelText;
+    IconData iconData;
+
+    switch (intent) {
+      case 'SPECTROGRAM':
+        labelText = 'GenUI: Visor de Espectrograma';
+        iconData = Icons.graphic_eq_rounded;
+        content = SpectrogramViewerWidget(result: result);
+        break;
+      case 'AUDIT_STATS':
+        labelText = 'GenUI: Resumen Auditado de Reportes';
+        iconData = Icons.assessment_rounded;
+        content = const AuditStatsWidget();
+        break;
+      case 'EXPLANATION':
+      default:
+        labelText = 'GenUI: Explicación de lo que Delató al Audio';
+        iconData = Icons.auto_awesome;
+        content = Column(
+          children: [
+            GeminiAiExplanationWidget(result: result),
+            const SizedBox(height: 12),
+            EngineResultsWidget(result: result),
+          ],
+        );
+        break;
+    }
+
+    return Stack(
+      children: [
+        Container(
+          margin: const EdgeInsets.only(top: 10),
+          child: content,
+        ),
+        Positioned(
+          top: 0,
+          right: 12,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: VocalisTheme.textPrimary,
+              borderRadius: BorderRadius.circular(10),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black12,
+                  blurRadius: 4,
+                  offset: Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(iconData, color: Colors.white, size: 12),
+                const SizedBox(width: 4),
+                Text(
+                  '$labelText #${index + 1}',
+                  style: const TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -1106,225 +1376,6 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     );
   }
 
-  Widget _buildRecentExpensesSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: const [
-            Text(
-              'Historial de Auditorías Recientes',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: VocalisTheme.textPrimary,
-              ),
-            ),
-            Text(
-              '3 Registros',
-              style: TextStyle(
-                fontSize: 11,
-                color: VocalisTheme.textTertiary,
-                fontFamily: 'monospace',
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        // Filter Chips
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: ['Todos', 'Recientes', 'Auditoría', 'Falsos Positivos'].asMap().entries.map((entry) {
-              final index = entry.key;
-              final title = entry.value;
-              final isSelected = _selectedFilterIndex == index;
-
-              return Padding(
-                padding: const EdgeInsets.only(right: 8.0),
-                child: ChoiceChip(
-                  selected: isSelected,
-                  label: Text(title),
-                  selectedColor: VocalisTheme.textPrimary,
-                  backgroundColor: Colors.white,
-                  labelStyle: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: isSelected ? Colors.white : VocalisTheme.textSecondary,
-                  ),
-                  onSelected: (val) {
-                    setState(() => _selectedFilterIndex = index);
-                  },
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-        const SizedBox(height: 12),
-
-        // Expense Cards List
-        Column(
-          children: _staticDetections.map((item) {
-            return Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(14),
-              decoration: VocalisTheme.glassCardDecoration(borderRadius: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Text(
-                                item['title']!,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.bold,
-                                  color: VocalisTheme.textPrimary,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: VocalisTheme.surfaceContainerLow,
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  item['category']!,
-                                  style: const TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold,
-                                    color: VocalisTheme.primary,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Row(
-                            children: [
-                              const Icon(Icons.graphic_eq_rounded,
-                                  size: 13, color: VocalisTheme.textTertiary),
-                              const SizedBox(width: 4),
-                              Text(
-                                item['duration']!,
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: VocalisTheme.textTertiary,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                              const Text('•',
-                                  style: TextStyle(
-                                      fontSize: 11, color: VocalisTheme.textTertiary)),
-                              const SizedBox(width: 6),
-                              Text(
-                                item['time']!,
-                                style: const TextStyle(
-                                    fontSize: 11, color: VocalisTheme.textTertiary),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                      Text(
-                        item['amount']!,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: item['statusColor'] == 'error'
-                              ? VocalisTheme.error
-                              : (item['statusColor'] == 'emerald'
-                                  ? VocalisTheme.accentEmerald
-                                  : VocalisTheme.accentAmber),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Transcription Quote Box
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: VocalisTheme.surfaceContainerLow.withValues(alpha: 0.6),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: VocalisTheme.glassBorderSubtle),
-                    ),
-                    child: Text(
-                      item['transcription']!,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontStyle: FontStyle.italic,
-                        color: VocalisTheme.textSecondary,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Badges Footer
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.shield_outlined,
-                              size: 14, color: VocalisTheme.textSecondary),
-                          const SizedBox(width: 4),
-                          Text(
-                            item['card']!,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              color: VocalisTheme.textSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: item['statusColor'] == 'emerald'
-                              ? VocalisTheme.accentEmerald.withValues(alpha: 0.12)
-                              : (item['statusColor'] == 'error'
-                                  ? VocalisTheme.error.withValues(alpha: 0.12)
-                                  : VocalisTheme.accentAmber.withValues(alpha: 0.12)),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          item['status']!,
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: item['statusColor'] == 'emerald'
-                                ? VocalisTheme.accentEmerald
-                                : (item['statusColor'] == 'error'
-                                    ? VocalisTheme.error
-                                    : VocalisTheme.accentAmber),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            );
-          }).toList(),
-        ),
-      ],
-    );
-  }
 
   // Bottom Navigation Bar Flotante (3 Pantallas)
   Widget _buildBottomNavBar() {

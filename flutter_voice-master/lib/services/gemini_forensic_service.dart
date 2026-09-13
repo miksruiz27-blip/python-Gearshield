@@ -64,4 +64,35 @@ class GeminiForensicService {
       };
     }
   }
+
+  /// Orquestador GenUI: Analiza la intención del usuario y determina qué widget(s) renderizar.
+  static Future<Map<String, dynamic>> resolveGenUiIntent(String query) async {
+    final lower = query.toLowerCase();
+
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    if (lower.contains('delato') || lower.contains('delató') || lower.contains('por que') || lower.contains('por qué') || lower.contains('explicacion') || lower.contains('explicación')) {
+      return {
+        'intent': 'EXPLANATION',
+        'response_text': 'Aquí tienes la explicación detallada de Gemini AI sobre qué delató la firma de voz.',
+      };
+    } else if (lower.contains('espectrograma') || lower.contains('frecuencia') || lower.contains('espectro') || lower.contains('grafica')) {
+      return {
+        'intent': 'SPECTROGRAM',
+        'response_text': 'Generando el visor de espectrograma forense para el análisis espectral.',
+      };
+    } else if (lower.contains('reporte') || lower.contains('reportes') || lower.contains('llamadas') || lower.contains('falso') || lower.contains('falsos') || lower.contains('conteo')) {
+      return {
+        'intent': 'AUDIT_STATS',
+        'response_text': 'Cargando el desglose de métricas auditadas: total de llamadas, falsos positivos y falsos negativos.',
+      };
+    } else {
+      // Fallback intent
+      return {
+        'intent': 'EXPLANATION',
+        'response_text': 'He procesado tu consulta: mostrando el dictamen forense asistido por Gemini AI.',
+      };
+    }
+  }
 }
+
