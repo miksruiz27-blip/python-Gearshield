@@ -17,6 +17,8 @@ except ImportError:
 
 from DataSet import extract_features, extract_features_sliding_window
 from MLbaseline import train_baseline_model, MODEL_PATH
+from sentence_vad import analyze_audio_by_sentences, segment_audio_by_acoustic_sentences
+from overlap_taper_vad import analyze_audio_with_overlap
 
 AI_THRESHOLD = 60.0  # Umbral calibrado de riesgo para declarar presencia de IA (%)
 ONNX_MODEL_PATH = "gearshield_engine.onnx"
@@ -46,25 +48,121 @@ def load_gearshield_engine(model_path=MODEL_PATH):
         print(f"[ERROR] No se pudo cargar el motor desde '{model_path}': {e}")
         return None, None
 
-def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, window_sec=3.0, hop_sec=1.0, alpha_ema=0.4):
+def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, window_sec=3.0, hop_sec=1.0, alpha_ema=0.4, mode="sentence_vad"):
     """
-    Analiza un archivo de audio mediante Ventana Deslizante (Chunking / Sliding Window) con Suavizado EMA
-    y Detección de Inyección/Empalme (Audio Splicing).
+    Analiza un archivo de audio mediante:
+    - mode="sentence_vad": Detección dinámica de oraciones por VAD.
+    - mode="overlap": Ventanas solapadas con atenuación Hann y Persistencia Temporal (2 consecutivas >= 0.75).
+    - mode="sliding": Ventana deslizante clásica.
     """
     if engine is None or scaler is None:
         engine, scaler = load_gearshield_engine(model_path)
         if engine is None:
             return {"error": "No se pudo inicializar el motor GearShield 2.0."}
 
+    target_sr = 16000
     if isinstance(audio_path, str):
         if not os.path.exists(audio_path):
             return {"error": f"El archivo '{audio_path}' no existe."}
-        audio_input = audio_path
+        try:
+            import soundfile as sf
+            y, sr = sf.read(audio_path, dtype='float32')
+            if len(y.shape) > 1:
+                y = np.mean(y, axis=1)
+            if sr != target_sr:
+                import librosa
+                y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+                sr = target_sr
+        except Exception:
+            import librosa
+            y, sr = librosa.load(audio_path, sr=target_sr, mono=True)
     else:
-        audio_input = audio_path
+        y = np.array(audio_path, dtype=np.float32)
+        if len(y.shape) > 1:
+            y = y[:, 0] if y.shape[1] >= 2 else y[0, :]
+        sr = target_sr
 
-    # 1. Extracción de ventanas deslizantes (220 características biofísicas)
-    chunks = extract_features_sliding_window(audio_input, window_sec=window_sec, hop_sec=hop_sec)
+    if mode == "overlap":
+        res_ov = analyze_audio_with_overlap(y, sr=sr, model=engine)
+        
+        max_ai_prob = res_ov["overall_risk_ai"]
+        avg_ai_prob = res_ov["overall_risk_ai"]
+        overall_risk = res_ov["overall_risk_ai"]
+
+        if res_ov["verdict"] == "AI_GENERATED":
+            risk_zone = "ZONA_ROJA"
+            label = "INTELIGENCIA ARTIFICIAL (100% Sintético / Deepfake - Confirmado por Persistencia)"
+            action_required = "BLOQUEO_ALERTA_DEEPFAKE"
+        elif res_ov["verdict"] == "SUSPICIOUS_TRANSIENT":
+            risk_zone = "ZONA_AMARILLA"
+            label = "DISPARO AISLADO / SOSPECHOSO (Descartado como Transitorio)"
+            action_required = "RECONFIRMACION_SEGUNDA_PRUEBA"
+        else:
+            risk_zone = "ZONA_VERDE"
+            label = "VOZ HUMANA ORGÁNICA (Sin alteración de IA)"
+            action_required = "APROBADO_ACCESO_CONCEDIDO"
+
+        ai_detected_intervals = [
+            (seg["start_sec"], seg["end_sec"], seg["prob_ai_percentage"])
+            for seg in res_ov["timeline_segments"] if seg.get("is_alert_candidate", False)
+        ]
+
+        return {
+            "audio_path": audio_path if isinstance(audio_path, str) else "buffer_stream.wav",
+            "label": label,
+            "risk_zone": risk_zone,
+            "action_required": action_required,
+            "overall_risk_ai": overall_risk,
+            "max_ai_prob": max_ai_prob,
+            "avg_ai_prob": avg_ai_prob,
+            "ai_detected_intervals": ai_detected_intervals,
+            "persistence_metrics": res_ov.get("persistence_metrics", {}),
+            "timeline": res_ov["timeline_segments"],
+            "windows_analyzed": res_ov["windows_analyzed"],
+            "latency_ms": res_ov["latency_ms"]
+        }
+
+    if mode == "sentence_vad" or mode is True:
+        res_vad = analyze_audio_by_sentences(y, sr=sr, model=engine)
+        
+        max_ai_prob = res_vad["overall_risk_ai"]
+        avg_ai_prob = res_vad["overall_risk_ai"]
+        overall_risk = res_vad["overall_risk_ai"]
+
+        if res_vad["verdict"] == "AI_GENERATED":
+            risk_zone = "ZONA_ROJA"
+            label = "INTELIGENCIA ARTIFICIAL (100% Sintético / Deepfake)"
+            action_required = "BLOQUEO_ALERTA_DEEPFAKE"
+        elif res_vad["verdict"] == "SUSPICIOUS_REVERIFY":
+            risk_zone = "ZONA_AMARILLA"
+            label = "AUDIO SOSPECHOSO / AMBIGUO (Requiere Reconfirmación de Voz)"
+            action_required = "RECONFIRMACION_SEGUNDA_PRUEBA"
+        else:
+            risk_zone = "ZONA_VERDE"
+            label = "VOZ HUMANA ORGÁNICA (Sin alteración de IA)"
+            action_required = "APROBADO_ACCESO_CONCEDIDO"
+
+        ai_detected_intervals = [
+            (seg["start_sec"], seg["end_sec"], seg["prob_ai_percentage"])
+            for seg in res_vad["timeline_segments"] if seg.get("is_synthetic", False)
+        ]
+
+        return {
+            "audio_path": audio_path if isinstance(audio_path, str) else "buffer_stream.wav",
+            "label": label,
+            "risk_zone": risk_zone,
+            "action_required": action_required,
+            "overall_risk_ai": overall_risk,
+            "max_ai_prob": max_ai_prob,
+            "avg_ai_prob": avg_ai_prob,
+            "ai_detected_intervals": ai_detected_intervals,
+            "timeline": res_vad["timeline_segments"],
+            "sentences_analyzed": res_vad["sentences_analyzed"],
+            "latency_ms": res_vad["latency_ms"]
+        }
+
+    # Fallback sliding window rígido si use_vad=False
+    chunks = extract_features_sliding_window(audio_path, window_sec=window_sec, hop_sec=hop_sec)
     if not chunks:
         return {"error": "Error al extraer ventanas de audio."}
 
@@ -74,7 +172,6 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
     sum_ai_prob = 0.0
     prev_ema = None
 
-    # 2. Inferencia segmento a segmento con suavizado EMA
     for chunk in chunks:
         feat = chunk["features"].astype(np.float32)
         
@@ -93,7 +190,6 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
             probs = model.predict_proba(feat_scaled)[0]
             raw_prob_ai = float(probs[1] * 100)
 
-        # Suavizado Exponencial Temporal (EMA)
         if prev_ema is None:
             prob_ai = raw_prob_ai
         else:
@@ -122,7 +218,6 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
 
     avg_ai_prob = sum_ai_prob / len(chunks)
 
-    # 3. Arquitectura de 3 Zonas de Riesgo Empresarial (Verde / Amarilla / Roja)
     if max_ai_prob >= 70.0 or len(ai_detected_intervals) == len(chunks):
         risk_zone = "ZONA_ROJA"
         label = "INTELIGENCIA ARTIFICIAL (100% Sintético / Deepfake)"
