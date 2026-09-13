@@ -6,10 +6,70 @@ import '../models/admin_stats.dart';
 import '../models/gearshield_result.dart';
 
 import 'local_vault_service.dart';
+import 'hive_service.dart';
 
 class GearShieldService {
-  // Endpoints configurables (127.0.0.1 para Desktop/Web, 10.0.2.2 para Android Emulator)
-  static const String _baseUrl = 'http://127.0.0.1:8000';
+  // Endpoints configurables (Railway Cloud URL principal con fallback local)
+  static const String _cloudUrl = 'https://python-gearshield-production.up.railway.app';
+  static const String _localUrl = 'http://127.0.0.1:8000';
+  static String get _baseUrl => _cloudUrl;
+
+  /// Inicia sesión de usuario llamando a FastAPI (/auth/login) y guarda token en Hive
+  static Future<Map<String, dynamic>> login(String email, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/auth/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email, 'password': password}),
+      ).timeout(const Duration(seconds: 6));
+
+      final Map<String, dynamic> body = jsonDecode(response.body);
+
+      if (response.statusCode == 200) {
+        final String token = body['access_token'] ?? '';
+        final String username = body['user']?['username'] ?? email.split('@')[0];
+        await HiveService.saveUserSession(token, username);
+        return {'success': true, 'message': body['message'] ?? 'Inicio de sesión exitoso', 'user': body['user']};
+      } else {
+        return {'success': false, 'message': body['detail'] ?? 'Error de autenticación'};
+      }
+    } catch (e) {
+      // Fallback si el servidor está inaccesible pero es el usuario de prueba
+      if (email.trim() == 'juanperez@gmail.com' && password.trim() == '12345') {
+        await HiveService.saveUserSession('mock_jwt_token_juanperez', 'juanperez');
+        return {
+          'success': true,
+          'message': 'Inicio de sesión exitoso (Offline Demo)',
+          'user': {'email': email, 'username': 'juanperez', 'full_name': 'Juan Pérez'}
+        };
+      }
+      return {'success': false, 'message': 'No se pudo conectar al servidor ($e)'};
+    }
+  }
+
+  /// Registra un nuevo usuario en FastAPI (/auth/register)
+  static Future<Map<String, dynamic>> register(String email, String password, {String? fullName}) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/auth/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email, 'password': password, 'full_name': fullName}),
+      ).timeout(const Duration(seconds: 6));
+
+      final Map<String, dynamic> body = jsonDecode(response.body);
+
+      if (response.statusCode == 200) {
+        final String token = body['access_token'] ?? '';
+        final String username = body['user']?['username'] ?? email.split('@')[0];
+        await HiveService.saveUserSession(token, username);
+        return {'success': true, 'message': body['message'] ?? 'Registro exitoso', 'user': body['user']};
+      } else {
+        return {'success': false, 'message': body['detail'] ?? 'Error al registrar usuario'};
+      }
+    } catch (e) {
+      return {'success': false, 'message': 'Error de conexión con el servidor ($e)'};
+    }
+  }
 
   /// Envía el archivo de audio al servidor backend FastAPI para análisis biofísico.
   /// Si el servidor no responde o no hay archivo, ejecuta el motor analítico de respaldo (fallback).

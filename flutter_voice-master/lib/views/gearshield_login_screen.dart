@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/vocalis_theme.dart';
+import '../services/gearshield_service.dart';
 import 'mobile_detector_screen.dart';
 
 class GearShieldLoginScreen extends StatefulWidget {
@@ -10,8 +11,8 @@ class GearShieldLoginScreen extends StatefulWidget {
 }
 
 class _GearShieldLoginScreenState extends State<GearShieldLoginScreen> {
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
+  final _emailController = TextEditingController(text: 'juanperez@gmail.com');
+  final _passwordController = TextEditingController(text: '12345');
   bool _obscurePassword = true;
   bool _isLoading = false;
 
@@ -36,18 +37,49 @@ class _GearShieldLoginScreenState extends State<GearShieldLoginScreen> {
   }
 
   void _handleLogin() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Por favor ingrese correo y contraseña'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
     setState(() {
       _isLoading = true;
     });
 
-    // Simulación de autenticación (listo para conectar con backend/Firebase)
-    await Future.delayed(const Duration(milliseconds: 800));
+    final result = await GearShieldService.login(email, password);
 
     if (mounted) {
       setState(() {
         _isLoading = false;
       });
-      _proceedToMainApp();
+
+      if (result['success'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result['message'] ?? 'Sesión iniciada correctamente'),
+            backgroundColor: const Color(0xFF10B981),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        _proceedToMainApp();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result['message'] ?? 'Error iniciando sesión'),
+            backgroundColor: VocalisTheme.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     }
   }
 

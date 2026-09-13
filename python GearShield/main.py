@@ -23,11 +23,32 @@ from Gearshield1 import analyze_audio, load_gearshield_engine
 from pdf_generator import generate_forensic_pdf
 import database
 import models
+import auth
+
+def seed_demo_user():
+    try:
+        db = database.SessionLocal()
+        user = db.query(models.User).filter(models.User.email == "juanperez@gmail.com").first()
+        if not user:
+            new_user = models.User(
+                username="juanperez",
+                email="juanperez@gmail.com",
+                hashed_password=auth.hash_password("12345"),
+                full_name="Juan Pérez",
+                role="user"
+            )
+            db.add(new_user)
+            db.commit()
+            print("[OK] Usuario de prueba sembrado: juanperez@gmail.com / 12345")
+        db.close()
+    except Exception as e:
+        print(f"[WARNING] No se pudo crear usuario semilla: {e}")
 
 # Inicializar tablas de la Base de Datos con manejo de errores seguro
 try:
     models.Base.metadata.create_all(bind=database.engine)
     print("[OK] Tablas de la Base de Datos verificadas/creadas correctamente.")
+    seed_demo_user()
 except Exception as e:
     print(f"[WARNING] No se pudo conectar a la base de datos inmediatamente: {e}")
 
@@ -172,6 +193,73 @@ class AnalysisResponse(BaseModel):
     avg_ai_prob: float
     ai_detected_intervals: list
     timeline: list[TimelineItem]
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: Optional[str] = "Usuario GearShield"
+    username: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+@app.post("/auth/register", summary="Registro de Usuarios")
+def register_user(payload: RegisterRequest, db: Session = Depends(database.get_db)):
+    username = payload.username or payload.email.split("@")[0]
+    existing_user = db.query(models.User).filter(
+        (models.User.email == payload.email) | (models.User.username == username)
+    ).first()
+    
+    if existing_user:
+        raise HTTPException(status_code=400, detail="El correo o nombre de usuario ya está registrado.")
+    
+    hashed_pwd = auth.hash_password(payload.password)
+    new_user = models.User(
+        username=username,
+        email=payload.email,
+        hashed_password=hashed_pwd,
+        full_name=payload.full_name,
+        role="user"
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    token = auth.create_access_token({"sub": new_user.email, "user_id": new_user.id, "role": new_user.role})
+    return {
+        "status": "success",
+        "message": "Usuario registrado exitosamente.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": new_user.id,
+            "email": new_user.email,
+            "username": new_user.username,
+            "full_name": new_user.full_name
+        }
+    }
+
+@app.post("/auth/login", summary="Inicio de Sesión (Login)")
+def login_user(payload: LoginRequest, db: Session = Depends(database.get_db)):
+    user = db.query(models.User).filter(models.User.email == payload.email).first()
+    
+    if not user or not auth.verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas. Verifique correo y contraseña.")
+    
+    token = auth.create_access_token({"sub": user.email, "user_id": user.id, "role": user.role})
+    return {
+        "status": "success",
+        "message": "Inicio de sesión exitoso.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "full_name": user.full_name
+        }
+    }
 
 class DetectResponse(BaseModel):
     is_synthetic: bool
