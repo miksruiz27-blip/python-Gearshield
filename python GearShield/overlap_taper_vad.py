@@ -111,8 +111,15 @@ def analyze_audio_with_overlap(
                         feat = extract_features(chunk_tapered, target_sr=sr)
                         if feat is not None:
                             outputs = session.run(None, {input_name: [feat.astype(np.float32)]})
-                            prob_dict = outputs[1][0]
-                            score_ai = float(prob_dict.get(1, prob_dict.get(1.0, 0.0)))
+                            prob_out = outputs[1][0]
+                            # skl2onnx con ZipMap devuelve un dict {clase: prob}; sin ZipMap
+                            # (este modelo) devuelve un array [prob_clase0, prob_clase1].
+                            # Asumir siempre dict tiraba AttributeError en cada ventana,
+                            # que el except silencioso convertía en score fijo para TODO audio.
+                            if isinstance(prob_out, dict):
+                                score_ai = float(prob_out.get(1, prob_out.get(1.0, 0.0)))
+                            else:
+                                score_ai = float(prob_out[1])
                     else:
                         sk_model = model["model"]
                         scaler = model.get("scaler")
