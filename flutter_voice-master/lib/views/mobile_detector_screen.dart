@@ -10,6 +10,7 @@ import '../widgets/ai_probability_widget.dart';
 import '../widgets/engine_results_widget.dart';
 import '../widgets/gearshield_mic_widget.dart';
 import '../widgets/spectrogram_viewer_widget.dart';
+import '../widgets/gemini_ai_explanation_widget.dart';
 import '../services/hive_service.dart';
 import 'gearshield_login_screen.dart';
 
