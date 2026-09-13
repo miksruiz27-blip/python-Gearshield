@@ -131,41 +131,56 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   }
 
   void _startListening() async {
-    bool available = await _speech.initialize();
+    setState(() {
+      _isListening = true;
+      _spokenText = '';
+      _latestResult = null;
+      _startTime = DateTime.now();
+    });
 
-    if (available) {
-      setState(() {
-        _isListening = true;
-        _spokenText = '';
-        _latestResult = null;
-        _startTime = DateTime.now();
-      });
+    bool recordedStarted = false;
+    try {
+      if (await _audioRecorder.hasPermission()) {
+        final tempDir = await getTemporaryDirectory();
+        _recordedAudioPath =
+            '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.wav';
+        
+        await _audioRecorder.start(
+          const RecordConfig(
+            encoder: AudioEncoder.wav,
+            sampleRate: 16000,
+            numChannels: 1,
+          ),
+          path: _recordedAudioPath!,
+        );
+        recordedStarted = true;
+      }
+    } catch (e) {
+      print('[MobileDetectorScreen] Error en AudioRecorder: $e');
+    }
 
-      try {
-        if (await _audioRecorder.hasPermission()) {
-          final tempDir = await getTemporaryDirectory();
-          _recordedAudioPath =
-              '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
-          await _audioRecorder.start(
-            const RecordConfig(encoder: AudioEncoder.aacLc),
-            path: _recordedAudioPath!,
-          );
-        }
-      } catch (_) {}
-
-      _speech.listen(
-        onResult: (val) {
-          setState(() {
-            _spokenText = val.recognizedWords;
-            if (val.hasConfidenceRating && val.confidence > 0) {
-              _confidence = val.confidence;
-            }
-          });
-        },
+    // SpeechToText para transcripción en pantalla (si el micrófono lo permite en paralelo)
+    try {
+      bool available = await _speech.initialize(
+        onError: (val) {},
       );
-    } else {
+      if (available) {
+        _speech.listen(
+          onResult: (val) {
+            setState(() {
+              _spokenText = val.recognizedWords;
+              if (val.hasConfidenceRating && val.confidence > 0) {
+                _confidence = val.confidence;
+              }
+            });
+          },
+        );
+      }
+    } catch (_) {}
+
+    if (!recordedStarted && _spokenText.isEmpty) {
       setState(() {
-        _spokenText = 'El micrófono no está disponible en este dispositivo.';
+        _spokenText = 'Grabando audio... (Modo directo)';
       });
     }
   }
