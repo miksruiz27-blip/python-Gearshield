@@ -59,31 +59,46 @@ def _timeline_stats(timeline):
         return 0.0, 0.0
     probs = [t["prob_ai"] for t in timeline]
     return float(max(probs)), float(sum(probs) / len(probs))
-ONNX_MODEL_PATH = "gearshield_engine.onnx"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ONNX_MODEL_PATH = os.path.join(BASE_DIR, "gearshield_engine.onnx")
+
+def _resolve_path(path):
+    if not path:
+        return path
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    alt = os.path.join(BASE_DIR, path)
+    if os.path.exists(alt):
+        return alt
+    return path
 
 def load_gearshield_engine(model_path=MODEL_PATH):
     """
     Carga el motor de inferencia ONNX runtime o Scikit-Learn pipeline fallback.
     """
+    resolved_model_path = _resolve_path(model_path)
+    resolved_onnx_path = _resolve_path(ONNX_MODEL_PATH)
+
     # Preferir ONNX Runtime para máxima velocidad e integración móvil
-    if HAS_ONNX and os.path.exists(ONNX_MODEL_PATH):
+    if HAS_ONNX and os.path.exists(resolved_onnx_path):
         try:
-            session = ort.InferenceSession(ONNX_MODEL_PATH)
-            pipeline_data = joblib.load(model_path) if os.path.exists(model_path) else None
-            scaler = pipeline_data["scaler"] if pipeline_data else None
+            session = ort.InferenceSession(resolved_onnx_path)
+            pipeline_data = joblib.load(resolved_model_path) if os.path.exists(resolved_model_path) else None
+            scaler = pipeline_data["scaler"] if pipeline_data and isinstance(pipeline_data, dict) and "scaler" in pipeline_data else None
             return {"type": "onnx", "session": session, "scaler": scaler}, scaler
-        except Exception:
+        except Exception as e:
+            print(f"[WARNING] Falló la carga de ONNX session ({e}), recurriendo a pipeline scikit-learn...")
             pass
 
-    if not os.path.exists(model_path):
-        print(f"[INFO] Modelo '{model_path}' no encontrado. Generando y entrenando motor GearShield 2.0...")
-        train_baseline_model(model_save_path=model_path)
+    if not os.path.exists(resolved_model_path):
+        print(f"[INFO] Modelo '{resolved_model_path}' no encontrado. Generando y entrenando motor GearShield 2.0...")
+        train_baseline_model(model_save_path=resolved_model_path)
 
     try:
-        pipeline_data = joblib.load(model_path)
+        pipeline_data = joblib.load(resolved_model_path)
         return {"type": "sklearn", "model": pipeline_data["model"], "scaler": pipeline_data["scaler"]}, pipeline_data["scaler"]
     except Exception as e:
-        print(f"[ERROR] No se pudo cargar el motor desde '{model_path}': {e}")
+        print(f"[ERROR] No se pudo cargar el motor desde '{resolved_model_path}': {e}")
         return None, None
 
 def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, window_sec=3.0, hop_sec=1.0, alpha_ema=0.4, mode="sentence_vad"):

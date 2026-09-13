@@ -168,6 +168,8 @@ def analyze_audio_by_sentences(
     timeline_segments = []
     high_risk_count_80 = 0
     mod_risk_count_65 = 0
+    max_consecutive_65 = 0
+    current_run_65 = 0
     max_prob_ai = 0.0
     sum_prob_ai = 0.0
 
@@ -205,8 +207,15 @@ def analyze_audio_by_sentences(
                         feat = extract_features(seg_y, target_sr=sr)
                         if feat is not None:
                             outputs = session.run(None, {input_name: [feat.astype(np.float32)]})
-                            prob_dict = outputs[1][0]
-                            prob_ai = float(prob_dict.get(1, prob_dict.get(1.0, 0.0)))
+                            prob_out = outputs[1][0]
+                            # skl2onnx con ZipMap devuelve un dict {clase: prob}; sin ZipMap
+                            # (este modelo) devuelve un array [prob_clase0, prob_clase1].
+                            # Asumir siempre dict tiraba AttributeError en cada ventana,
+                            # que el except silencioso convertía en 10% fijo para TODO audio.
+                            if isinstance(prob_out, dict):
+                                prob_ai = float(prob_out.get(1, prob_out.get(1.0, 0.0)))
+                            else:
+                                prob_ai = float(prob_out[1])
                     else:
                         sk_model = model["model"]
                         scaler = model.get("scaler")
@@ -235,6 +244,10 @@ def analyze_audio_by_sentences(
             high_risk_count_80 += 1
         if prob_ai >= 0.65:
             mod_risk_count_65 += 1
+            current_run_65 += 1
+            max_consecutive_65 = max(max_consecutive_65, current_run_65)
+        else:
+            current_run_65 = 0
 
         if prob_ai > max_prob_ai:
             max_prob_ai = prob_ai
@@ -255,8 +268,15 @@ def analyze_audio_by_sentences(
     avg_prob_ai = sum_prob_ai / len(segments) if segments else 0.0
 
     # 3. Regla de Agregación de Incidentes para Veredicto de Fraude
-    # - "AI_GENERATED" si al menos 1 oración supera prob >= 0.80 O si al menos 2 oraciones superan prob >= 0.65
-    if high_risk_count_80 >= 1 or mod_risk_count_65 >= 2:
+    # - "AI_GENERATED" si al menos 1 oración supera prob >= 0.80, O si al menos
+    #   2 oraciones CONSECUTIVAS superan prob >= 0.65 (persistencia temporal).
+    #   Antes bastaban 2 oraciones en CUALQUIER parte del audio (ni siquiera
+    #   consecutivas) para disparar el veredicto completo: un solo par de
+    #   picos aislados de ruido del propio motor (no relacionados entre sí)
+    #   ya bloqueaba una llamada entera. Ahora se exige la misma persistencia
+    #   temporal que ya usa el modo "overlap" (`analyze_audio_with_overlap`),
+    #   más resistente a falsos positivos puntuales.
+    if high_risk_count_80 >= 1 or max_consecutive_65 >= 2:
         verdict = "AI_GENERATED"
         overall_confidence = float(round(max_prob_ai, 4))
         overall_risk_ai = float(round(max_prob_ai * 100.0, 2))

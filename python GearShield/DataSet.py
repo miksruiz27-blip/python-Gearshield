@@ -31,8 +31,8 @@ def extract_features(audio_path_or_y, target_sr=16000, n_mfcc=20):
                 y = y[:, 0] if y.shape[1] >= 2 else y[0, :]
             sr = target_sr
 
-        if len(y) < int(sr * 0.2):  # Menos de 200 ms
-            y = np.pad(y, (0, int(sr * 0.2) - len(y)))
+        if len(y) < int(sr * 0.5):  # Menos de 500 ms (requerido para librosa.feature.delta width=9)
+            y = np.pad(y, (0, int(sr * 0.5) - len(y)))
 
         features = []
 
@@ -105,11 +105,22 @@ def extract_features(audio_path_or_y, target_sr=16000, n_mfcc=20):
                 j_rap = float(np.mean(np.abs(valid_p[2:] - 2*valid_p[1:-1] + valid_p[:-2])) / (p_mean + 1e-6))
                 p_d_mean, p_d_std = float(np.mean(p_diff)), float(np.std(p_diff))
                 v_ratio = float(len(valid_p) / len(pitch))
+                # PPQ5 (Period Perturbation Quotient a 5 puntos): compara cada
+                # periodo de pitch contra el promedio de sus 4 vecinos más
+                # cercanos. Complementa a jitter local/RAP con una ventana más
+                # ancha, estándar en análisis clínico de voz (Praat, PRAAT-like).
+                if len(valid_p) > 4:
+                    smooth5 = np.convolve(valid_p, np.ones(5) / 5.0, mode='valid')
+                    ppq5 = float(np.mean(np.abs(valid_p[2:-2] - smooth5)) / (p_mean + 1e-6))
+                else:
+                    ppq5 = 0.0
             else:
                 p_mean=p_std=p_max=p_min=j_local=j_rap=p_d_mean=p_d_std=v_ratio=0.0
+                ppq5 = 0.0
         except Exception:
             p_mean=p_std=p_max=p_min=j_local=j_rap=p_d_mean=p_d_std=v_ratio=0.0
-        features.extend([p_mean, p_std, p_max, p_min, j_local, j_rap, p_d_mean, p_d_std, v_ratio, 0.0])
+            ppq5 = 0.0
+        features.extend([p_mean, p_std, p_max, p_min, j_local, j_rap, p_d_mean, p_d_std, v_ratio, ppq5])
 
         # 13. Shimmer & Perturbación Micro-Amplitud de Cuerdas Vocales (10 características)
         rms_arr = rms[0]
@@ -123,16 +134,46 @@ def extract_features(audio_path_or_y, target_sr=16000, n_mfcc=20):
         rms_skew = float(np.mean((rms_arr - np.mean(rms_arr))**3) / (rms_std**3 + 1e-6))
         peak_rms = float(np.max(np.abs(y)) / rms_mean)
         dyn_range = float(20 * np.log10(np.max(np.abs(y)) / (np.min(np.abs(y)[np.abs(y)>1e-5]) + 1e-6) + 1.0))
-        features.extend([s_local, s_db, s_apq3, s_apq5, rms_std, rms_skew, peak_rms, dyn_range, 0.0, 0.0])
+        # Curtosis de energía: qué tan "pico" es la distribución de RMS entre
+        # frames. Un motor TTS suele producir una envolvente de energía más
+        # uniforme (curtosis baja) que la dinámica irregular del habla humana.
+        rms_kurtosis = float(np.mean((rms_arr - np.mean(rms_arr)) ** 4) / (rms_std ** 4 + 1e-6)) if rms_std > 0 else 0.0
+        # Proporción de frames cerca del piso de silencio digital. El habla
+        # humana rara vez cae en silencio absoluto (ruido de sala/línea);
+        # muchos TTS sí generan silencio "perfecto" entre palabras.
+        floor_ratio = float(np.mean(rms_arr < (0.02 * np.max(rms_arr) + 1e-9))) if len(rms_arr) > 0 else 0.0
+        features.extend([s_local, s_db, s_apq3, s_apq5, rms_std, rms_skew, peak_rms, dyn_range, rms_kurtosis, floor_ratio])
 
         # 14. Relación Armónico a Ruido (HNR) y Energía Glótica (10 características)
         stft = librosa.stft(y)
         mag = np.abs(stft)
-        low_e = float(np.mean(mag[:50, :]))
-        high_e = float(np.mean(mag[50:, :]))
+        # Bandas como arrays (no colapsadas a escalar todavía): antes `low_e`/
+        # `high_e` ya eran floats aquí y std(low_e)/std(high_e) más abajo
+        # eran std() de un escalar -> siempre 0.0 en TODAS las muestras.
+        low_band = mag[:50, :]
+        high_band = mag[50:, :]
+        low_e = float(np.mean(low_band))
+        high_e = float(np.mean(high_band))
         hnr_proxy = float(10 * np.log10((low_e + 1e-9) / (high_e + 1e-9)))
         h_ratio = float(low_e / (low_e + high_e + 1e-9))
-        features.extend([hnr_proxy, h_ratio, float(np.mean(low_e)), float(np.std(low_e)), float(np.mean(high_e)), float(np.std(high_e)), 0.0, 0.0, 0.0, 0.0])
+        # Flujo espectral (cambio frame-a-frame del espectro, media rectificada):
+        # el habla humana varía de forma más abrupta e irregular; un TTS suave
+        # tiende a transiciones más lineales/predecibles.
+        flux = np.diff(mag, axis=1)
+        flux_pos = np.clip(flux, 0.0, None)
+        flux_mean = float(np.mean(flux_pos))
+        flux_std = float(np.std(flux_pos))
+        # Entropía espectral (Shannon) del espectro de potencia normalizado por
+        # frame: mide qué tan "ruidoso" vs. tonal-perfecto es el espectro.
+        power = mag ** 2
+        power_norm = power / (np.sum(power, axis=0, keepdims=True) + 1e-12)
+        spec_entropy = -np.sum(power_norm * np.log2(power_norm + 1e-12), axis=0)
+        spec_entropy_mean = float(np.mean(spec_entropy))
+        spec_entropy_std = float(np.std(spec_entropy))
+        features.extend([
+            hnr_proxy, h_ratio, low_e, float(np.std(low_band)), high_e, float(np.std(high_band)),
+            flux_mean, flux_std, spec_entropy_mean, spec_entropy_std,
+        ])
 
         # 15. Coherencia de Fase Espectral y Frecuencia Instantánea (20 características)
         phase = np.angle(stft)
@@ -264,27 +305,45 @@ def load_dataset_from_directory(data_dir="data", window_sec=3.0, hop_sec=1.5, ma
                 return name[: -len(suffix)]
         return name
 
-    # Seleccionar sub-conjunto balanceado de claves de grupos humanos para evitar desbalance extremo
-    human_files = []
-    human_dir = os.path.join(data_dir, human_folder_name)
-    if os.path.exists(human_dir):
-        for ext in audio_extensions:
-            human_files.extend(glob.glob(os.path.join(human_dir, ext)))
-    
-    selected_human_base_keys = set()
-    for f in human_files:
-        if len(selected_human_base_keys) >= max_human_base_files:
-            break
-        k = base_group_key(f)
-        selected_human_base_keys.add(k)
+    def _select_base_keys(folder_path, cap):
+        """Selecciona hasta `cap` claves base únicas a partir de los propios
+        archivos de `folder_path` (no de otra carpeta)."""
+        files = []
+        if os.path.exists(folder_path):
+            for ext in audio_extensions:
+                files.extend(glob.glob(os.path.join(folder_path, ext)))
+        keys = set()
+        for f in files:
+            if len(keys) >= cap:
+                break
+            keys.add(base_group_key(f))
+        return keys
 
-    # Seleccionar sub-conjunto balanceado de claves de grupos IA
-    ai_files = []
-    ai_dir = os.path.join(data_dir, "ai")
-    if os.path.exists(ai_dir):
-        for ext in audio_extensions:
-            ai_files.extend(glob.glob(os.path.join(ai_dir, ext)))
-    selected_ai_base_keys = set([base_group_key(f) for f in ai_files[:max_human_base_files]]) if ai_files else set()
+    # Selección balanceada de claves de grupo, calculada de forma INDEPENDIENTE
+    # por carpeta (antes se calculaba solo desde `human_clean_3s`/`human` y
+    # ese mismo set se reusaba también para filtrar `human_augmented` por
+    # coincidencia de substring "human" en el nombre de carpeta).
+    #
+    # Eso rompía en silencio la carpeta `human_augmented`: sus archivos vienen
+    # del pipeline de la llamada de Altur (`altur_human_call_<id>_t###_<aug>`),
+    # una fuente distinta a `human_clean_3s` (`hclean_####_##`), así que sus
+    # claves base NUNCA coincidían con `selected_human_base_keys` -> los
+    # 26,535 archivos de `human_augmented` (voz humana con condiciones
+    # realistas: teléfono, GSM, ruido, compresión) quedaban excluidos de TODO
+    # entrenamiento pasado, mientras que `ai_augmented` sí se incluía siempre
+    # (`ai_sample_01` + sufijo SÍ comparte clave con `ai_sample_01.wav`). El
+    # modelo nunca vio voz humana degradada por códec/ruido, solo voz IA en
+    # esas condiciones -> aprendía a asociar compresión/ruido con "IA".
+    selected_human_base_keys = _select_base_keys(os.path.join(data_dir, human_folder_name), max_human_base_files)
+    selected_human_augmented_base_keys = _select_base_keys(os.path.join(data_dir, "human_augmented"), max_human_base_files)
+    selected_ai_base_keys = _select_base_keys(os.path.join(data_dir, "ai"), max_human_base_files)
+
+    category_key_sets = {
+        human_folder_name: selected_human_base_keys,
+        "human_augmented": selected_human_augmented_base_keys,
+        "ai": selected_ai_base_keys,
+        "ai_augmented": selected_ai_base_keys,  # ai_augmented SÍ comparte claves base con ai
+    }
 
     group_key_to_id = {}
     tasks = []
@@ -298,11 +357,10 @@ def load_dataset_from_directory(data_dir="data", window_sec=3.0, hop_sec=1.5, ma
         for ext in audio_extensions:
             files.extend(glob.glob(os.path.join(folder_path, ext)))
 
-        # Filtrar archivos humanos e IA si superan la selección balanceada
-        if "human" in category_folder and selected_human_base_keys:
-            files = [f for f in files if base_group_key(f) in selected_human_base_keys]
-        elif "ai" in category_folder and selected_ai_base_keys:
-            files = [f for f in files if base_group_key(f) in selected_ai_base_keys]
+        # Filtrar por la selección balanceada propia de ESTA carpeta.
+        allowed_keys = category_key_sets.get(category_folder)
+        if allowed_keys:
+            files = [f for f in files if base_group_key(f) in allowed_keys]
 
         print(f"[INFO] Preparando {len(files)} archivos desde '{folder_path}' (Etiqueta {label} - {category_folder.upper()})...", flush=True)
 
@@ -313,16 +371,23 @@ def load_dataset_from_directory(data_dir="data", window_sec=3.0, hop_sec=1.5, ma
             group_id = group_key_to_id[key]
             tasks.append((filepath, label, group_id, window_sec, hop_sec))
 
-    print(f"[INFO] Procesando {len(tasks)} archivos de audio en paralelo usando Multiprocessing...", flush=True)
+    # El código decía "en paralelo usando Multiprocessing" pero nunca usaba
+    # el `concurrent.futures` importado arriba: el bucle era secuencial.
+    # Con ProcessPoolExecutor real se usan todos los núcleos disponibles.
+    max_workers = max(1, (os.cpu_count() or 4) - 1)
+    print(f"[INFO] Procesando {len(tasks)} archivos de audio en paralelo usando Multiprocessing ({max_workers} procesos)...", flush=True)
 
     total_chunks = 0
-    for idx, task in enumerate(tasks):
-        res_list = _process_single_file(task)
-        for feat, label, group_id in res_list:
-            X.append(feat)
-            y.append(label)
-            groups.append(group_id)
-            total_chunks += 1
+    if tasks:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            for idx, res_list in enumerate(executor.map(_process_single_file, tasks, chunksize=4)):
+                for feat, label, group_id in res_list:
+                    X.append(feat)
+                    y.append(label)
+                    groups.append(group_id)
+                    total_chunks += 1
+                if (idx + 1) % 200 == 0:
+                    print(f"   ... {idx + 1}/{len(tasks)} archivos procesados, {total_chunks} fragmentos extraídos", flush=True)
 
     print(f"[OK] Extracción finalizada. Total fragmentos: {total_chunks}.", flush=True)
 
