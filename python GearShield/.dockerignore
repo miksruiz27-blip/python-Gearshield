@@ -1,0 +1,21 @@
+# Ignorar datos de entrenamiento multi-gigabyte y datasets para optimizar el build en Railway
+data/
+external_datasets/
+*.tar.gz
+
+# Ignorar archivos temporales y cachés de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.vscode/
+.idea/
+.git/
+
+# Ignorar archivos locales temporales y base de datos local
+uploads/*
+reconfirmations/*
+reports/*
+!reports/logs_db.json
+gearshield.db

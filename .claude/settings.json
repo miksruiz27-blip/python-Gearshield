@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/Users/lachu/OneDrive/Desktop/Gearshield Project/.claude/hooks/block_protected_paths.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+# Archivos de datos pesados y datasets (Evita subir 5GB a GitHub)
+python GearShield/data/
+external_datasets/
+*.tar.gz
+*.wav
+*.mp3
+
+# Python y entornos virtuales
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# Base de datos local y temporales
+python GearShield/uploads/*
+python GearShield/reconfirmations/*
+python GearShield/reports/*
+!python GearShield/reports/logs_db.json
+*.db
+*.sqlite3
+
+# Flutter y artefactos compilados
+flutter_voice-master/.dart_tool/
+flutter_voice-master/.flutter-plugins
+flutter_voice-master/.flutter-plugins-dependencies
+flutter_voice-master/.pub-cache/
+flutter_voice-master/.pub/
+flutter_voice-master/build/
+flutter_voice-master/ios/Pods/
+flutter_voice-master/ios/.symlinks/
+
+# IDEs y archivos del sistema
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

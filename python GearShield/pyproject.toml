@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    "data",
+    "external_datasets",
+    "uploads",
+    "reconfirmations",
+    "reports",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
