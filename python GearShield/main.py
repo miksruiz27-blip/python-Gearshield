@@ -332,15 +332,17 @@ async def detect_endpoint(request: Request):
         if isinstance(body_json, str):
             b64_str = body_json
         elif isinstance(body_json, dict):
-            for key in ["audio", "wav", "audio_b64", "clip", "file", "data"]:
+            for key in ["audio_base64", "audio", "wav", "audio_b64", "clip", "file", "data"]:
                 if key in body_json and isinstance(body_json[key], str):
                     b64_str = body_json[key]
                     break
             if not b64_str:
+                longest_str = ""
                 for val in body_json.values():
-                    if isinstance(val, str) and len(val) > 20:
-                        b64_str = val
-                        break
+                    if isinstance(val, str) and len(val) > len(longest_str):
+                        longest_str = val
+                if len(longest_str) > 20:
+                    b64_str = longest_str
     except Exception:
         body_bytes = await request.body()
         raw_text = body_bytes.decode("utf-8", errors="ignore").strip()
