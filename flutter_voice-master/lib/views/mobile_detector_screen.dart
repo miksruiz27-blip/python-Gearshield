@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -15,6 +18,7 @@ import '../widgets/gemini_ai_explanation_widget.dart';
 import '../widgets/audit_stats_widget.dart';
 import '../services/gemini_forensic_service.dart';
 import '../services/hive_service.dart';
+import '../services/local_vault_service.dart';
 import 'gearshield_login_screen.dart';
 
 class MobileDetectorScreen extends StatefulWidget {
@@ -52,7 +56,7 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   bool _realtimeAlerts = true;
   bool _localFallbackEnabled = true;
   double _sensitivityThreshold = 65.0;
-  final String _apiEndpoint = 'http://127.0.0.1:8000';
+  String _apiEndpoint = GearShieldService.activeBaseUrl;
   final String _inferenceEngine = 'ONNX Runtime (Acelerado)';
 
   final List<Map<String, String>> _staticDetections = [
@@ -106,6 +110,50 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     )..repeat(reverse: true);
 
     _initSpeech();
+    _loadSavedEndpoint();
+  }
+
+  Future<void> _loadSavedEndpoint() async {
+    await GearShieldService.loadSavedEndpoint();
+    if (mounted) setState(() => _apiEndpoint = GearShieldService.activeBaseUrl);
+  }
+
+  /// Diálogo para cambiar la URL del backend (p.ej. IP LAN de la PC desde el celular)
+  Future<void> _editApiEndpoint() async {
+    final controller = TextEditingController(text: _apiEndpoint);
+    final String? newUrl = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('URL de API Servidor'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          decoration: const InputDecoration(
+            hintText: 'http://192.168.1.50:8000',
+            helperText: 'En celular físico usa la IP LAN de la PC, no 127.0.0.1',
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+    if (newUrl == null) return;
+
+    GearShieldService.setApiEndpoint(newUrl);
+    await LocalVaultService.saveSettings(
+      apiEndpoint: newUrl.trim(),
+      sensitivityThreshold: _sensitivityThreshold,
+      localFallbackEnabled: _localFallbackEnabled,
+      autoPdfReport: _autoPdfReport,
+      realtimeAlerts: _realtimeAlerts,
+    );
+    if (mounted) setState(() => _apiEndpoint = GearShieldService.activeBaseUrl);
   }
 
   void _initSpeech() async {
@@ -154,22 +202,24 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   }
 
   void _startListening() async {
-    // 1. Solicitar permiso de micrófono explícitamente en dispositivos móviles físicos
-    try {
-      final micStatus = await Permission.microphone.request();
-      if (!micStatus.isGranted) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Permiso de micrófono no concedido. Por favor habilítalo en los ajustes del dispositivo.'),
-              backgroundColor: VocalisTheme.error,
-            ),
-          );
+    // 1. Solicitar permiso de micrófono (exclusivo para dispositivos móviles físicos)
+    if (!kIsWeb) {
+      try {
+        final micStatus = await Permission.microphone.request();
+        if (!micStatus.isGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Permiso de micrófono no concedido. Por favor habilítalo en los ajustes del dispositivo.'),
+                backgroundColor: VocalisTheme.error,
+              ),
+            );
+          }
+          return;
         }
-        return;
+      } catch (e) {
+        print('[MobileDetectorScreen] Fallback al verificar permiso: $e');
       }
-    } catch (e) {
-      print('[MobileDetectorScreen] Fallback al verificar permiso: $e');
     }
 
     setState(() {
@@ -180,34 +230,66 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     });
 
     bool recordedStarted = false;
+    String startError = '';
     InputDevice? externalDevice;
     try {
-      if (await _audioRecorder.hasPermission()) {
-        externalDevice = await _pickExternalInputDevice();
+      final hasPerm = await _audioRecorder
+          .hasPermission()
+          .timeout(const Duration(seconds: 10), onTimeout: () => false);
+      if (!hasPerm) {
+        startError = 'Permiso de micrófono denegado por el sistema.';
+      } else {
+        if (!kIsWeb) {
+          externalDevice = await _pickExternalInputDevice()
+              .timeout(const Duration(seconds: 3), onTimeout: () => null);
+        }
 
-        // Verificar el codificador soportado por el hardware móvil
         AudioEncoder encoder = AudioEncoder.wav;
         if (!await _audioRecorder.isEncoderSupported(AudioEncoder.wav)) {
           encoder = AudioEncoder.aacLc;
         }
 
-        final tempDir = await getTemporaryDirectory();
-        final ext = (encoder == AudioEncoder.wav) ? 'wav' : 'm4a';
-        _recordedAudioPath =
-            '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.$ext';
+        String recordPath = '';
+        if (!kIsWeb) {
+          try {
+            final tempDir = await getTemporaryDirectory();
+            final ext = (encoder == AudioEncoder.wav) ? 'wav' : 'm4a';
+            recordPath = '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.$ext';
+          } catch (e) {
+            print('[MobileDetectorScreen] path_provider no disponible: $e');
+          }
+        }
+        _recordedAudioPath = recordPath.isNotEmpty ? recordPath : null;
 
-        await _audioRecorder.start(
-          RecordConfig(
-            encoder: encoder,
-            sampleRate: 16000,
-            numChannels: 1,
-            device: externalDevice,
-          ),
-          path: _recordedAudioPath!,
-        );
+        // manageBluetooth: false -> el plugin NO desvía la captura a auriculares /
+        // relojes Bluetooth SCO emparejados (por defecto lo hace, y en Android 12+
+        // eso deja el micrófono integrado del teléfono sin usar o cuelga start()
+        // si el enlace SCO no conecta). Con device == null se usa el mic integrado.
+        await _audioRecorder
+            .start(
+              RecordConfig(
+                encoder: encoder,
+                sampleRate: 16000,
+                numChannels: 1,
+                device: externalDevice,
+                androidConfig: const AndroidRecordConfig(
+                  manageBluetooth: false,
+                  audioSource: AndroidAudioSource.mic,
+                ),
+              ),
+              path: recordPath,
+            )
+            .timeout(const Duration(seconds: 10));
         recordedStarted = true;
       }
+    } on TimeoutException {
+      startError = 'El micrófono no respondió a tiempo (timeout).';
+      print('[MobileDetectorScreen] Timeout iniciando AudioRecorder');
+      try {
+        await _audioRecorder.cancel();
+      } catch (_) {}
     } catch (e) {
+      startError = '$e';
       print('[MobileDetectorScreen] Error en AudioRecorder: $e');
     }
 
@@ -238,9 +320,15 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
 
     if (!recordedStarted && mounted) {
       setState(() {
-        _spokenText = 'No se pudo iniciar la grabación del micrófono.';
+        _spokenText = 'No se pudo iniciar la grabación del micrófono. $startError'.trim();
         _isListening = false;
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No se pudo iniciar la grabación. $startError'.trim()),
+          backgroundColor: VocalisTheme.error,
+        ),
+      );
     }
   }
 
@@ -252,14 +340,9 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
       _isAnalyzing = true;
     });
 
-    _speech.stop();
-
-    String? audioPath;
     try {
-      audioPath = await _audioRecorder.stop();
-    } catch (_) {
-      audioPath = _recordedAudioPath;
-    }
+      _speech.stop();
+    } catch (_) {}
 
     double durationSec = 3.0;
     if (_startTime != null) {
@@ -268,19 +351,62 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
       if (durationSec < 1.0) durationSec = 1.5;
     }
 
-    final result = await GearShieldService.analyzeVoice(
-      audioPath: audioPath ?? _recordedAudioPath,
-      spokenText: _spokenText,
-      durationSeconds: durationSec,
-    );
+    GearShieldResult? result;
+    try {
+      // 1. Cerrar la grabación. Si el plugin nativo no responde, usamos la ruta
+      //    que ya conocíamos en vez de esperar para siempre.
+      String? audioPath;
+      try {
+        audioPath = await _audioRecorder
+            .stop()
+            .timeout(const Duration(seconds: 8));
+      } on TimeoutException {
+        print('[MobileDetectorScreen] Timeout en AudioRecorder.stop(); usando ruta conocida.');
+        audioPath = _recordedAudioPath;
+      } catch (e) {
+        print('[MobileDetectorScreen] Error en AudioRecorder.stop(): $e');
+        audioPath = _recordedAudioPath;
+      }
 
-    if (mounted) {
-      setState(() {
-        _isAnalyzing = false;
-        _latestResult = result;
-        // Navega automáticamente a la pestaña de métricas para mostrar el pergamino de resultados
-        _selectedNavIndex = 1;
-      });
+      // 2. Análisis remoto con tope global; si excede, motor local.
+      result = await GearShieldService.analyzeVoice(
+        audioPath: audioPath ?? _recordedAudioPath,
+        spokenText: _spokenText,
+        durationSeconds: durationSec,
+      ).timeout(const Duration(seconds: 60));
+    } catch (e) {
+      print('[MobileDetectorScreen] Análisis falló o excedió el tiempo: $e. Usando motor local.');
+      try {
+        result = await GearShieldService.runLocalFallback(
+          spokenText: _spokenText,
+          durationSeconds: durationSec,
+          audioPath: _recordedAudioPath,
+        );
+      } catch (e2) {
+        print('[MobileDetectorScreen] Motor local también falló: $e2');
+      }
+    } finally {
+      // Pase lo que pase, nunca dejamos el spinner girando.
+      if (mounted) {
+        setState(() {
+          _isAnalyzing = false;
+          if (result != null) {
+            _latestResult = result;
+            // Navega automáticamente a la pestaña de métricas para mostrar el pergamino de resultados
+            _selectedNavIndex = 1;
+          } else {
+            _spokenText = 'No se pudo analizar el audio. Intenta de nuevo.';
+          }
+        });
+        if (result == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No se pudo analizar el audio. Intenta de nuevo.'),
+              backgroundColor: VocalisTheme.error,
+            ),
+          );
+        }
+      }
     }
   }
 
@@ -859,7 +985,7 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
                 subtitle: _apiEndpoint,
                 icon: Icons.link_rounded,
                 trailing: TextButton(
-                  onPressed: () {},
+                  onPressed: _editApiEndpoint,
                   child: const Text('Editar', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                 ),
               ),

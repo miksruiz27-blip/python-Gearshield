@@ -9,10 +9,54 @@ import 'local_vault_service.dart';
 import 'hive_service.dart';
 
 class GearShieldService {
-  // Endpoints configurables (Railway Cloud URL principal con fallback local)
+  // Endpoints configurables (Railway Cloud URL principal con fallback local).
+  // El usuario puede sobreescribir la URL desde Ajustes > "URL de API Servidor"
+  // (necesario en celular físico: 127.0.0.1 apunta al propio teléfono, hay que
+  // usar la IP LAN de la PC, p.ej. http://192.168.1.50:8000).
   static const String _cloudUrl = 'https://python-gearshield-production.up.railway.app';
   static const String _localUrl = 'http://127.0.0.1:8000';
-  static String get _baseUrl => _cloudUrl;
+  static String? _customUrl;
+
+  static String get _baseUrl => _customUrl ?? _cloudUrl;
+
+  /// URL activa que se muestra en Ajustes
+  static String get activeBaseUrl => _baseUrl;
+
+  /// Candidatos a probar en orden para /analyze: URL personalizada, cloud, local.
+  static List<String> get _analyzeCandidates {
+    final urls = <String>[];
+    if (_customUrl != null && _customUrl!.isNotEmpty) urls.add(_customUrl!);
+    urls.add(_cloudUrl);
+    urls.add(_localUrl);
+    return urls.toSet().toList();
+  }
+
+  /// Carga la URL personalizada guardada en la bóveda local (llamar al iniciar la app)
+  static Future<void> loadSavedEndpoint() async {
+    final settings = await LocalVaultService.getSettings();
+    final saved = settings?['api_endpoint'] as String?;
+    if (saved != null && saved.trim().isNotEmpty) {
+      _customUrl = _normalizeUrl(saved);
+    }
+  }
+
+  /// Define la URL del backend en caliente (sin reiniciar la app)
+  static void setApiEndpoint(String? url) {
+    if (url == null || url.trim().isEmpty) {
+      _customUrl = null;
+    } else {
+      _customUrl = _normalizeUrl(url);
+    }
+  }
+
+  static String _normalizeUrl(String url) {
+    var u = url.trim();
+    if (!u.startsWith('http://') && !u.startsWith('https://')) u = 'http://$u';
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
+    return u;
+  }
 
   /// Inicia sesión de usuario llamando a FastAPI (/auth/login) y guarda token en Hive
   static Future<Map<String, dynamic>> login(String email, String password) async {
@@ -96,31 +140,62 @@ class GearShieldService {
 
   /// Envía el archivo de audio al servidor backend FastAPI para análisis biofísico.
   /// Si el servidor no responde o no hay archivo, ejecuta el motor analítico de respaldo (fallback).
+  /// Esta función NUNCA lanza excepción ni se queda colgada: cada intento de red
+  /// tiene timeout propio y cualquier error termina en el motor local.
   static Future<GearShieldResult> analyzeVoice({
     String? audioPath,
     String spokenText = '',
     double durationSeconds = 3.0,
   }) async {
-    if (audioPath != null && audioPath.isNotEmpty && File(audioPath).existsSync()) {
-      try {
-        var request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/analyze'));
-        request.files.add(await http.MultipartFile.fromPath('file', audioPath));
-        
-        var streamedResponse = await request.send().timeout(const Duration(seconds: 5));
-        if (streamedResponse.statusCode == 200) {
-          var responseData = await streamedResponse.stream.bytesToString();
-          var jsonMap = jsonDecode(responseData);
-          final result = GearShieldResult.fromJson(jsonMap);
-          await LocalVaultService.saveResult(result);
-          return result;
-        }
-      } catch (e) {
-        // Imprimir error de conexión y proceder con fallback offline
-        print('[GearShieldService] Server offline o unreachable: $e. Usando motor biofísico local.');
-      }
+    bool fileOk = false;
+    try {
+      fileOk = audioPath != null && audioPath.isNotEmpty && File(audioPath).existsSync();
+    } catch (e) {
+      print('[GearShieldService] No se pudo verificar el archivo de audio: $e');
     }
 
-    // --- Motor Analítico Biofísico de Respaldo Local (Standalone Fallback Engine) ---
+    if (fileOk) {
+      for (final base in _analyzeCandidates) {
+        try {
+          var request = http.MultipartRequest('POST', Uri.parse('$base/analyze'));
+          request.files.add(await http.MultipartFile.fromPath('file', audioPath!));
+
+          // El backend procesa el audio completo antes de responder cabeceras,
+          // por eso el timeout de send() debe cubrir la inferencia (no sólo la conexión).
+          var streamedResponse =
+              await request.send().timeout(const Duration(seconds: 25));
+          if (streamedResponse.statusCode == 200) {
+            var responseData = await streamedResponse.stream
+                .bytesToString()
+                .timeout(const Duration(seconds: 10));
+            var jsonMap = jsonDecode(responseData);
+            final result = GearShieldResult.fromJson(jsonMap);
+            await LocalVaultService.saveResult(result);
+            return result;
+          }
+          print('[GearShieldService] $base/analyze respondió HTTP ${streamedResponse.statusCode}. Probando siguiente URL.');
+        } catch (e) {
+          // Imprimir error de conexión y probar el siguiente endpoint
+          print('[GearShieldService] $base no disponible: $e.');
+        }
+      }
+      print('[GearShieldService] Ningún servidor respondió. Usando motor biofísico local.');
+    }
+
+    return runLocalFallback(
+      spokenText: spokenText,
+      durationSeconds: durationSeconds,
+      audioPath: audioPath,
+    );
+  }
+
+  /// Motor Analítico Biofísico de Respaldo Local (Standalone Fallback Engine).
+  /// Público para que la UI pueda invocarlo directamente si el análisis remoto excede su tiempo.
+  static Future<GearShieldResult> runLocalFallback({
+    String spokenText = '',
+    double durationSeconds = 3.0,
+    String? audioPath,
+  }) async {
     final localResult = _runLocalDetectionEngine(spokenText, durationSeconds, audioPath);
     await LocalVaultService.saveResult(localResult);
     return localResult;
