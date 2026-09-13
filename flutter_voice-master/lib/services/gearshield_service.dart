@@ -17,17 +17,21 @@ class GearShieldService {
   static const String _localUrl = 'http://127.0.0.1:8000';
   static String? _customUrl;
 
-  static String get _baseUrl => _customUrl ?? _cloudUrl;
+  // Offline-First: Priorizar servidor local sobre la nube
+  static String get _baseUrl => _customUrl ?? _localUrl;
 
   /// URL activa que se muestra en Ajustes
   static String get activeBaseUrl => _baseUrl;
 
-  /// Candidatos a probar en orden para /analyze: URL personalizada, cloud, local.
+  /// Candidatos a probar en orden para /analyze (Offline-First):
+  /// 1. URL Personalizada / IP LAN local
+  /// 2. Servidor Local (http://127.0.0.1:8000)
+  /// 3. Servidor Cloud de respaldo (Railway)
   static List<String> get _analyzeCandidates {
     final urls = <String>[];
     if (_customUrl != null && _customUrl!.isNotEmpty) urls.add(_customUrl!);
-    urls.add(_cloudUrl);
     urls.add(_localUrl);
+    urls.add(_cloudUrl);
     return urls.toSet().toList();
   }
 

@@ -21,6 +21,44 @@ from sentence_vad import analyze_audio_by_sentences, segment_audio_by_acoustic_s
 from overlap_taper_vad import analyze_audio_with_overlap
 
 AI_THRESHOLD = 60.0  # Umbral calibrado de riesgo para declarar presencia de IA (%)
+
+
+def _normalize_timeline(segments, flag_key):
+    """
+    Convierte los segmentos de los modos VAD / overlap al contrato público del
+    timeline (el mismo que usan /analyze, el PDF y la app Flutter):
+        start_sec, end_sec, prob_human (%), prob_ai (%), is_ai (bool)
+
+    Los modos VAD/overlap producen `prob_ai`/`score` como fracción 0-1 y marcan
+    la ventana con `is_synthetic` / `is_alert_candidate`, lo que rompía la
+    validación de respuesta de FastAPI (campo `is_ai` faltante) y dejaba a la
+    app sin datos reales. Se conservan los campos extra de cada modo.
+    """
+    normalized = []
+    for seg in segments:
+        pct = seg.get("prob_ai_percentage")
+        if pct is None:
+            raw = seg.get("prob_ai", seg.get("score", 0.0))
+            pct = float(raw) * 100.0 if float(raw) <= 1.0 else float(raw)
+        pct = float(round(float(pct), 2))
+        item = dict(seg)
+        item.update({
+            "start_sec": float(seg["start_sec"]),
+            "end_sec": float(seg["end_sec"]),
+            "prob_ai": pct,
+            "prob_human": float(round(100.0 - pct, 2)),
+            "is_ai": bool(seg.get(flag_key, False)),
+        })
+        normalized.append(item)
+    return normalized
+
+
+def _timeline_stats(timeline):
+    """Devuelve (max_ai_prob, avg_ai_prob) en % a partir del timeline normalizado."""
+    if not timeline:
+        return 0.0, 0.0
+    probs = [t["prob_ai"] for t in timeline]
+    return float(max(probs)), float(sum(probs) / len(probs))
 ONNX_MODEL_PATH = "gearshield_engine.onnx"
 
 def load_gearshield_engine(model_path=MODEL_PATH):
@@ -84,9 +122,9 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
 
     if mode == "overlap":
         res_ov = analyze_audio_with_overlap(y, sr=sr, model=engine)
-        
-        max_ai_prob = res_ov["overall_risk_ai"]
-        avg_ai_prob = res_ov["overall_risk_ai"]
+
+        timeline = _normalize_timeline(res_ov["timeline_segments"], "is_alert_candidate")
+        max_ai_prob, avg_ai_prob = _timeline_stats(timeline)
         overall_risk = res_ov["overall_risk_ai"]
 
         if res_ov["verdict"] == "AI_GENERATED":
@@ -103,8 +141,8 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
             action_required = "APROBADO_ACCESO_CONCEDIDO"
 
         ai_detected_intervals = [
-            (seg["start_sec"], seg["end_sec"], seg["prob_ai_percentage"])
-            for seg in res_ov["timeline_segments"] if seg.get("is_alert_candidate", False)
+            (seg["start_sec"], seg["end_sec"], seg["prob_ai"])
+            for seg in timeline if seg["is_ai"]
         ]
 
         return {
@@ -117,16 +155,16 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
             "avg_ai_prob": avg_ai_prob,
             "ai_detected_intervals": ai_detected_intervals,
             "persistence_metrics": res_ov.get("persistence_metrics", {}),
-            "timeline": res_ov["timeline_segments"],
+            "timeline": timeline,
             "windows_analyzed": res_ov["windows_analyzed"],
             "latency_ms": res_ov["latency_ms"]
         }
 
     if mode == "sentence_vad" or mode is True:
         res_vad = analyze_audio_by_sentences(y, sr=sr, model=engine)
-        
-        max_ai_prob = res_vad["overall_risk_ai"]
-        avg_ai_prob = res_vad["overall_risk_ai"]
+
+        timeline = _normalize_timeline(res_vad["timeline_segments"], "is_synthetic")
+        max_ai_prob, avg_ai_prob = _timeline_stats(timeline)
         overall_risk = res_vad["overall_risk_ai"]
 
         if res_vad["verdict"] == "AI_GENERATED":
@@ -143,8 +181,8 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
             action_required = "APROBADO_ACCESO_CONCEDIDO"
 
         ai_detected_intervals = [
-            (seg["start_sec"], seg["end_sec"], seg["prob_ai_percentage"])
-            for seg in res_vad["timeline_segments"] if seg.get("is_synthetic", False)
+            (seg["start_sec"], seg["end_sec"], seg["prob_ai"])
+            for seg in timeline if seg["is_ai"]
         ]
 
         return {
@@ -156,7 +194,7 @@ def analyze_audio(audio_path, engine=None, scaler=None, model_path=MODEL_PATH, w
             "max_ai_prob": max_ai_prob,
             "avg_ai_prob": avg_ai_prob,
             "ai_detected_intervals": ai_detected_intervals,
-            "timeline": res_vad["timeline_segments"],
+            "timeline": timeline,
             "sentences_analyzed": res_vad["sentences_analyzed"],
             "latency_ms": res_vad["latency_ms"]
         }

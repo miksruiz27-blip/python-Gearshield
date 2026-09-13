@@ -35,7 +35,7 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
       'summary':
           'Transición de frecuencias anormalmente perfecta entre vocales. Ninguna cuerda vocal humana puede cambiar de tono sin micro-turbulencia de aire.',
       'detail':
-          'En el segundo 0:04.5, la envolvente espectral muestra un movimiento de formantes completamente lineal generado por matemática del algoritmo TTS (Text-to-Speech).',
+          'La envolvente espectral muestra un movimiento de formantes completamente lineal generado por matemática del algoritmo TTS (Text-to-Speech).',
     },
     {
       'icon': 'memory',
@@ -100,17 +100,48 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
   double get _totalDurationSeconds {
     final timeline = widget.result.timeline;
     if (timeline.isEmpty) return 0.0;
-    return timeline.last.endSec;
+    // Los segmentos del VAD no vienen necesariamente ordenados ni contiguos:
+    // el eje temporal va de 0 al fin del último segmento real.
+    return timeline.map((t) => t.endSec).reduce((a, b) => a > b ? a : b);
   }
 
-  /// Ventana con más riesgo: la marcada como IA con mayor probabilidad si
-  /// hay alguna, o si no, la de mayor probabilidad simplemente.
+  /// Timeline ordenado cronológicamente (el backend por oraciones ya lo
+  /// entrega en orden, pero el motor local y logs antiguos no lo garantizan).
+  List<TimelineItem> get _sortedTimeline {
+    final list = List<TimelineItem>.from(widget.result.timeline);
+    list.sort((a, b) => a.startSec.compareTo(b.startSec));
+    return list;
+  }
+
+  /// Ventanas marcadas como IA por el motor, en orden cronológico.
+  List<TimelineItem> get _flaggedWindows =>
+      _sortedTimeline.where((t) => t.isAi).toList();
+
+  /// Ventana con la probabilidad IA más alta de todo el audio.
   TimelineItem? get _peakWindow {
     final timeline = widget.result.timeline;
     if (timeline.isEmpty) return null;
-    final flagged = timeline.where((t) => t.isAi).toList();
-    final pool = flagged.isNotEmpty ? flagged : timeline;
-    return pool.reduce((a, b) => b.probAi > a.probAi ? b : a);
+    return timeline.reduce((a, b) => b.probAi > a.probAi ? b : a);
+  }
+
+  /// "Momento que delató a la IA": la PRIMERA ventana (cronológicamente)
+  /// que el motor marcó como sintética. Si ninguna fue marcada, se muestra la
+  /// ventana de mayor riesgo como referencia (sin llamarla detección).
+  TimelineItem? get _triggerWindow {
+    final flagged = _flaggedWindows;
+    if (flagged.isNotEmpty) return flagged.first;
+    return _peakWindow;
+  }
+
+  bool get _hasAiDetection => _flaggedWindows.isNotEmpty;
+
+  /// Umbral (en %) a partir del cual el motor marcó ventanas como IA. Se infiere
+  /// del propio resultado (mínima prob. marcada) para dibujar la línea de corte
+  /// coherente con lo que decidió el backend; 60% si no hay ventanas marcadas.
+  double get _aiThresholdPercent {
+    final flagged = _flaggedWindows;
+    if (flagged.isEmpty) return 60.0;
+    return flagged.map((t) => t.probAi).reduce((a, b) => a < b ? a : b);
   }
 
   String _formatTime(double seconds) {
@@ -128,9 +159,16 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
     final aiRiskPercentage = result.maxAiProb;
     final isAiHighRisk = aiRiskPercentage >= 60.0;
     final primaryColor = isAiHighRisk ? VocalisTheme.error : VocalisTheme.accentEmerald;
+    final trigger = _triggerWindow;
     final peak = _peakWindow;
-    final triggerInterval =
-        peak != null ? '${_formatTime(peak.startSec)} - ${_formatTime(peak.endSec)}' : '—';
+    final hasDetection = _hasAiDetection;
+    final triggerInterval = trigger != null
+        ? '${_formatTime(trigger.startSec)} - ${_formatTime(trigger.endSec)}'
+        : '—';
+    final peakInterval = peak != null
+        ? '${_formatTime(peak.startSec)} - ${_formatTime(peak.endSec)}'
+        : '—';
+    final peakIsTrigger = peak != null && trigger != null && identical(peak, trigger);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -235,7 +273,7 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
                   ),
                 ],
               ),
-              if (peak != null) ...[
+              if (trigger != null) ...[
                 const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -244,37 +282,57 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
                     borderRadius: BorderRadius.circular(VocalisTheme.radiusChip),
                     border: Border.all(color: primaryColor.withValues(alpha: 0.2)),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(
-                        peak.isAi ? Icons.crisis_alert_rounded : Icons.check_circle_outline_rounded,
-                        size: 16,
-                        color: primaryColor,
+                      Row(
+                        children: [
+                          Icon(
+                            hasDetection ? Icons.crisis_alert_rounded : Icons.check_circle_outline_rounded,
+                            size: 16,
+                            color: primaryColor,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: RichText(
+                              text: TextSpan(
+                                style: const TextStyle(fontSize: VocalisTheme.textBody, color: VocalisTheme.textPrimary),
+                                children: [
+                                  TextSpan(
+                                    text: hasDetection
+                                        ? 'Momento exacto que delató a la IA: '
+                                        : 'Ventana con mayor riesgo evaluado: ',
+                                    style: const TextStyle(fontWeight: FontWeight.bold),
+                                  ),
+                                  TextSpan(
+                                    text: '$triggerInterval (${trigger.probAi.toStringAsFixed(1)}% IA)',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      color: primaryColor,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: RichText(
-                          text: TextSpan(
-                            style: const TextStyle(fontSize: VocalisTheme.textBody, color: VocalisTheme.textPrimary),
-                            children: [
-                              TextSpan(
-                                text: peak.isAi
-                                    ? 'Momento exacto que delató a la IA: '
-                                    : 'Ventana con mayor riesgo evaluado: ',
-                                style: const TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                              TextSpan(
-                                text: triggerInterval,
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: primaryColor,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                            ],
+                      if (hasDetection && peak != null && !peakIsTrigger) ...[
+                        const SizedBox(height: 4),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 24),
+                          child: Text(
+                            'Pico de riesgo: $peakInterval (${peak.probAi.toStringAsFixed(1)}% IA) · '
+                            '${_flaggedWindows.length} de ${widget.result.timeline.length} ventanas marcadas',
+                            style: const TextStyle(
+                              fontSize: VocalisTheme.textLabel,
+                              color: VocalisTheme.textSecondary,
+                              fontFamily: 'monospace',
+                            ),
                           ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
@@ -285,23 +343,27 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
         const SizedBox(height: 16),
 
         // Gráfica de Riesgo IA por Ventana Temporal
-        _buildRiskTimelineHud(primaryColor, peak, triggerInterval),
+        _buildRiskTimelineHud(primaryColor, trigger, triggerInterval),
         const SizedBox(height: 20),
 
         // Título de Explicaciones Sencillas
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'Explicaciones Forenses: ¿Qué delató a la IA?',
-              style: TextStyle(
-                fontSize: VocalisTheme.textTitle,
-                fontWeight: FontWeight.bold,
-                color: VocalisTheme.textPrimary,
+            Expanded(
+              child: Text(
+                hasDetection
+                    ? 'Explicaciones Forenses: ¿Qué delató a la IA?'
+                    : 'Indicadores Biofísicos Verificados',
+                style: const TextStyle(
+                  fontSize: VocalisTheme.textTitle,
+                  fontWeight: FontWeight.bold,
+                  color: VocalisTheme.textPrimary,
+                ),
               ),
             ),
             Text(
-              '${_aiReasons.length} Anomalías Clave',
+              hasDetection ? '${_aiReasons.length} Anomalías Clave' : 'Sin anomalías',
               style: const TextStyle(
                 fontSize: VocalisTheme.textLabel,
                 color: VocalisTheme.textTertiary,
@@ -312,16 +374,74 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
         ),
         const SizedBox(height: 12),
 
-        // Explicaciones sencillas (Tarjetas Interactivas)
-        _buildAiReasonCards(),
+        // Explicaciones sencillas (Tarjetas Interactivas) ancladas al momento real
+        if (hasDetection)
+          _buildAiReasonCards(trigger!, triggerInterval)
+        else
+          _buildHumanVerifiedCard(peak),
       ],
     );
   }
 
-  Widget _buildRiskTimelineHud(Color primaryColor, TimelineItem? peak, String triggerInterval) {
-    final timeline = widget.result.timeline;
-    final flaggedCount = timeline.where((t) => t.isAi).length;
+  /// Tarjeta que se muestra cuando ninguna ventana fue marcada como IA:
+  /// no tiene sentido listar "anomalías" de un audio orgánico.
+  Widget _buildHumanVerifiedCard(TimelineItem? peak) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: VocalisTheme.glassCardDecoration(
+        borderColor: VocalisTheme.accentEmerald.withValues(alpha: 0.4),
+        borderRadius: VocalisTheme.radiusCard,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: VocalisTheme.accentEmerald.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(VocalisTheme.radiusChip),
+            ),
+            child: const Icon(Icons.verified_user_rounded, color: VocalisTheme.accentEmerald, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Micro-inestabilidad biofísica presente (Jitter/Shimmer)',
+                  style: TextStyle(
+                    fontSize: VocalisTheme.textBody,
+                    fontWeight: FontWeight.bold,
+                    color: VocalisTheme.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  peak != null
+                      ? 'Ninguna ventana superó el umbral de detección. La ventana de mayor riesgo '
+                          '(${_formatTime(peak.startSec)} - ${_formatTime(peak.endSec)}) alcanzó '
+                          '${peak.probAi.toStringAsFixed(1)}% de probabilidad IA, dentro del rango orgánico.'
+                      : 'Ninguna ventana superó el umbral de detección de voz sintética.',
+                  style: const TextStyle(
+                    fontSize: VocalisTheme.textLabel,
+                    color: VocalisTheme.textSecondary,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRiskTimelineHud(Color primaryColor, TimelineItem? trigger, String triggerInterval) {
+    final timeline = _sortedTimeline;
+    final flaggedCount = _flaggedWindows.length;
     final totalDuration = _totalDurationSeconds;
+    final hasDetection = _hasAiDetection;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -385,10 +505,10 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
               }
 
               final startRatio = totalDuration > 0
-                  ? (peak!.startSec / totalDuration).clamp(0.0, 1.0)
+                  ? (trigger!.startSec / totalDuration).clamp(0.0, 1.0)
                   : 0.0;
               final endRatio = totalDuration > 0
-                  ? (peak!.endSec / totalDuration).clamp(0.0, 1.0)
+                  ? (trigger!.endSec / totalDuration).clamp(0.0, 1.0)
                   : 0.0;
               final boxLeft = canvasWidth * startRatio;
               final boxRight = canvasWidth * endRatio;
@@ -404,16 +524,24 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
-                    // Barras de probabilidad IA por ventana.
+                    // Barras de probabilidad IA por ventana, posicionadas en
+                    // su tiempo real (los segmentos VAD tienen distinta duración
+                    // y huecos de silencio: por índice quedaban desalineadas
+                    // respecto a la caja del momento detectado).
                     ClipRRect(
                       borderRadius: BorderRadius.circular(12),
                       child: CustomPaint(
                         size: Size(canvasWidth, canvasHeight),
-                        painter: AiRiskBarsPainter(timeline: timeline),
+                        painter: AiRiskBarsPainter(
+                          timeline: timeline,
+                          totalDuration: totalDuration,
+                          aiThreshold: _aiThresholdPercent,
+                        ),
                       ),
                     ),
 
-                    // Franja que marca el rango de tiempo de la ventana pico.
+                    // Franja que marca el rango de tiempo del momento que delató a la IA
+                    // (o de la ventana de mayor riesgo si no hubo detección).
                     Positioned(
                       left: boxLeft,
                       top: 0,
@@ -423,10 +551,12 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
                         child: Container(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(4),
+                            color: (hasDetection ? VocalisTheme.error : VocalisTheme.accentEmerald)
+                                .withValues(alpha: 0.10),
                             border: Border.all(
-                              color: (peak!.isAi ? VocalisTheme.error : VocalisTheme.accentEmerald)
-                                  .withValues(alpha: 0.7),
-                              width: 1.4,
+                              color: (hasDetection ? VocalisTheme.error : VocalisTheme.accentEmerald)
+                                  .withValues(alpha: 0.85),
+                              width: 1.6,
                             ),
                           ),
                         ),
@@ -462,8 +592,8 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
                       },
                     ),
 
-                    // Etiqueta flotante anclada a la ventana pico.
-                    if (peak.isAi)
+                    // Etiqueta flotante anclada al momento que delató a la IA.
+                    if (hasDetection)
                       Positioned(
                         left: labelLeft,
                         top: 8,
@@ -501,7 +631,7 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  '${peak.probAi.toStringAsFixed(1)}% de probabilidad IA en esta ventana',
+                                  '${trigger!.probAi.toStringAsFixed(1)}% de probabilidad IA en esta ventana',
                                   style: const TextStyle(fontSize: 9, color: Colors.white70),
                                   overflow: TextOverflow.ellipsis,
                                 ),
@@ -579,10 +709,17 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
     );
   }
 
-  Widget _buildAiReasonCards() {
+  Widget _buildAiReasonCards(TimelineItem trigger, String triggerInterval) {
+    // Las tarjetas explican las anomalías típicas de TTS; el detalle se ancla
+    // al intervalo real que disparó la detección en ESTE audio en vez de a un
+    // segundo fijo de ejemplo.
+    final anchor =
+        'Detectado en el intervalo $triggerInterval (${trigger.probAi.toStringAsFixed(1)}% IA). ';
+
     return Column(
       children: List.generate(_aiReasons.length, (index) {
-        final item = _aiReasons[index];
+        final item = Map<String, String>.from(_aiReasons[index]);
+        item['detail'] = anchor + (item['detail'] ?? '');
         final isSelected = _selectedReasonIndex == index;
         final severityColor = _severityColor(item['severity']!);
 
@@ -700,33 +837,18 @@ class _SpectrogramViewerWidgetState extends State<SpectrogramViewerWidget>
 /// que no representaba ningún dato real devuelto por el backend.
 class AiRiskBarsPainter extends CustomPainter {
   final List<TimelineItem> timeline;
+  final double totalDuration;
+  final double aiThreshold;
 
-  AiRiskBarsPainter({required this.timeline});
+  AiRiskBarsPainter({
+    required this.timeline,
+    required this.totalDuration,
+    this.aiThreshold = 60.0,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = VocalisTheme.forensicCanvas);
-
-    if (timeline.isNotEmpty) {
-      final barWidth = size.width / timeline.length;
-      for (int i = 0; i < timeline.length; i++) {
-        final item = timeline[i];
-        final amplitude = (item.probAi / 100.0).clamp(0.0, 1.0);
-        final barHeight = (amplitude * size.height).clamp(3.0, size.height);
-        final color = item.isAi ? VocalisTheme.error : VocalisTheme.forensicHighEnergy;
-
-        final barRect = Rect.fromLTWH(
-          i * barWidth,
-          size.height - barHeight,
-          (barWidth * 0.72).clamp(1.0, barWidth),
-          barHeight,
-        );
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(barRect, const Radius.circular(2)),
-          Paint()..color = color,
-        );
-      }
-    }
 
     // Líneas guía horizontales (cada 25% de altura) muy sutiles.
     final gridPaint = Paint()
@@ -736,10 +858,71 @@ class AiRiskBarsPainter extends CustomPainter {
       final y = size.height * i / 4;
       canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
     }
+
+    if (timeline.isNotEmpty && totalDuration > 0) {
+      final pxPerSec = size.width / totalDuration;
+      const gap = 1.5;
+
+      for (final item in timeline) {
+        final amplitude = (item.probAi / 100.0).clamp(0.0, 1.0);
+        final barHeight = (amplitude * size.height).clamp(3.0, size.height);
+
+        final left = (item.startSec * pxPerSec).clamp(0.0, size.width);
+        final right = (item.endSec * pxPerSec).clamp(0.0, size.width);
+        final width = (right - left - gap).clamp(2.0, size.width);
+
+        final color = item.isAi ? VocalisTheme.error : VocalisTheme.forensicHighEnergy;
+        final barRect = Rect.fromLTWH(left + gap / 2, size.height - barHeight, width, barHeight);
+
+        // Relleno degradado: intensidad proporcional al riesgo.
+        final paint = Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.bottomCenter,
+            end: Alignment.topCenter,
+            colors: [color.withValues(alpha: 0.55), color],
+          ).createShader(barRect);
+        canvas.drawRRect(RRect.fromRectAndRadius(barRect, const Radius.circular(3)), paint);
+
+        // Contorno para las ventanas marcadas: se distinguen aun siendo estrechas.
+        if (item.isAi) {
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(barRect, const Radius.circular(3)),
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2
+              ..color = Colors.white.withValues(alpha: 0.7),
+          );
+        }
+      }
+    }
+
+    // Línea de umbral de detección IA (punteada).
+    final thresholdY = size.height * (1.0 - (aiThreshold / 100.0).clamp(0.0, 1.0));
+    final thresholdPaint = Paint()
+      ..color = VocalisTheme.error.withValues(alpha: 0.75)
+      ..strokeWidth = 1.2;
+    const dash = 6.0;
+    const space = 4.0;
+    double x = 0;
+    while (x < size.width) {
+      canvas.drawLine(Offset(x, thresholdY), Offset((x + dash).clamp(0.0, size.width), thresholdY), thresholdPaint);
+      x += dash + space;
+    }
+    final tp = TextPainter(
+      text: TextSpan(
+        text: 'umbral IA ${aiThreshold.toStringAsFixed(0)}%',
+        style: TextStyle(fontSize: 9, color: VocalisTheme.error.withValues(alpha: 0.9), fontFamily: 'monospace'),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final labelY = (thresholdY - tp.height - 2).clamp(0.0, size.height - tp.height);
+    tp.paint(canvas, Offset(size.width - tp.width - 6, labelY));
   }
 
   @override
   bool shouldRepaint(covariant AiRiskBarsPainter oldDelegate) {
-    return oldDelegate.timeline != timeline;
+    return oldDelegate.timeline != timeline ||
+        oldDelegate.totalDuration != totalDuration ||
+        oldDelegate.aiThreshold != aiThreshold;
   }
 }

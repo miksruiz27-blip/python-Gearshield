@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -351,36 +352,136 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
       if (durationSec < 1.0) durationSec = 1.5;
     }
 
+    // Cerrar la grabación. Si el plugin nativo no responde, usamos la ruta
+    // que ya conocíamos en vez de esperar para siempre.
+    String? audioPath;
+    try {
+      audioPath = await _audioRecorder
+          .stop()
+          .timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      print('[MobileDetectorScreen] Timeout en AudioRecorder.stop(); usando ruta conocida.');
+      audioPath = _recordedAudioPath;
+    } catch (e) {
+      print('[MobileDetectorScreen] Error en AudioRecorder.stop(): $e');
+      audioPath = _recordedAudioPath;
+    }
+
+    await _runAnalysis(
+      audioPath: audioPath ?? _recordedAudioPath,
+      spokenText: _spokenText,
+      durationSec: durationSec,
+    );
+  }
+
+  /// Abre el selector de archivos, toma una nota de voz (WAV/MP3/M4A/OGG/FLAC)
+  /// y la manda por el mismo pipeline de análisis que la grabación en vivo.
+  Future<void> _pickAndAnalyzeFile() async {
+    if (_isListening || _isAnalyzing) return;
+
+    PlatformFile? file;
+    try {
+      file = await FilePicker.pickFile(
+        dialogTitle: 'Selecciona una nota de voz',
+        type: FileType.custom,
+        allowedExtensions: const ['wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'],
+      );
+    } catch (e) {
+      print('[MobileDetectorScreen] Error abriendo selector de archivos: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('No se pudo abrir el selector de archivos ($e)'),
+            backgroundColor: VocalisTheme.error,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (file == null) return; // usuario canceló
+    final String fileName = file.name;
+    final path = file.path;
+    if (path == null || path.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('El archivo seleccionado no tiene ruta accesible en este dispositivo.'),
+            backgroundColor: VocalisTheme.error,
+          ),
+        );
+      }
+      return;
+    }
+
+    const maxBytes = 50 * 1024 * 1024;
+    int sizeBytes = file.lengthSync() ?? 0;
+    if (sizeBytes == 0) {
+      try {
+        sizeBytes = await file.length();
+      } catch (_) {}
+    }
+    if (sizeBytes > maxBytes) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('El archivo supera el límite de 50MB.'),
+            backgroundColor: VocalisTheme.error,
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _isAnalyzing = true;
+      _latestResult = null;
+      _recordedAudioPath = path;
+      _spokenText = 'Archivo cargado: $fileName';
+      _confidence = 1.0;
+    });
+
+    await _runAnalysis(
+      audioPath: path,
+      spokenText: '',
+      durationSec: _estimateDurationSeconds(path, sizeBytes),
+    );
+  }
+
+  /// Estimación de duración para el motor local de respaldo (el backend real
+  /// no la necesita): WAV PCM 16-bit mono 16 kHz ≈ 32 KB/s; formatos
+  /// comprimidos ≈ 16 KB/s a 128 kbps. Sólo se usa para dimensionar el timeline.
+  double _estimateDurationSeconds(String path, int sizeBytes) {
+    final lower = path.toLowerCase();
+    final double bytesPerSec = lower.endsWith('.wav') || lower.endsWith('.flac')
+        ? 32000.0
+        : 16000.0;
+    final est = sizeBytes / bytesPerSec;
+    return est.clamp(1.5, 600.0);
+  }
+
+  /// Pipeline de análisis compartido (grabación en vivo y archivo subido).
+  /// Nunca lanza excepción y siempre apaga el spinner `_isAnalyzing`.
+  Future<void> _runAnalysis({
+    required String? audioPath,
+    required String spokenText,
+    required double durationSec,
+  }) async {
     GearShieldResult? result;
     try {
-      // 1. Cerrar la grabación. Si el plugin nativo no responde, usamos la ruta
-      //    que ya conocíamos en vez de esperar para siempre.
-      String? audioPath;
-      try {
-        audioPath = await _audioRecorder
-            .stop()
-            .timeout(const Duration(seconds: 8));
-      } on TimeoutException {
-        print('[MobileDetectorScreen] Timeout en AudioRecorder.stop(); usando ruta conocida.');
-        audioPath = _recordedAudioPath;
-      } catch (e) {
-        print('[MobileDetectorScreen] Error en AudioRecorder.stop(): $e');
-        audioPath = _recordedAudioPath;
-      }
-
-      // 2. Análisis remoto con tope global; si excede, motor local.
+      // Análisis remoto con tope global; si excede, motor local.
       result = await GearShieldService.analyzeVoice(
-        audioPath: audioPath ?? _recordedAudioPath,
-        spokenText: _spokenText,
+        audioPath: audioPath,
+        spokenText: spokenText,
         durationSeconds: durationSec,
       ).timeout(const Duration(seconds: 60));
     } catch (e) {
       print('[MobileDetectorScreen] Análisis falló o excedió el tiempo: $e. Usando motor local.');
       try {
         result = await GearShieldService.runLocalFallback(
-          spokenText: _spokenText,
+          spokenText: spokenText,
           durationSeconds: durationSec,
-          audioPath: _recordedAudioPath,
+          audioPath: audioPath,
         );
       } catch (e2) {
         print('[MobileDetectorScreen] Motor local también falló: $e2');
@@ -1413,6 +1514,14 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   }
 
   Widget _buildFileDropzone() {
+    return InkWell(
+      onTap: (_isListening || _isAnalyzing) ? null : _pickAndAnalyzeFile,
+      borderRadius: BorderRadius.circular(16),
+      child: _buildFileDropzoneBody(),
+    );
+  }
+
+  Widget _buildFileDropzoneBody() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -1448,7 +1557,7 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
                     ),
                   ),
                   Text(
-                    'WAV, MP3, M4A, OGG hasta 50MB',
+                    'WAV, MP3, M4A, OGG, FLAC hasta 50MB',
                     style: TextStyle(
                       fontSize: 10,
                       color: VocalisTheme.textTertiary,
@@ -1469,7 +1578,7 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
               ),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             ),
-            onPressed: () {},
+            onPressed: (_isListening || _isAnalyzing) ? null : _pickAndAnalyzeFile,
             child: const Text('Examinar',
                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
           ),

@@ -179,6 +179,8 @@ def record_log_entry(analysis_result: dict, filename: str = "audio_clip.wav") ->
 model, scaler = load_gearshield_engine()
 
 class TimelineItem(BaseModel):
+    model_config = {"extra": "allow"}
+
     start_sec: float
     end_sec: float
     prob_human: float
@@ -186,8 +188,14 @@ class TimelineItem(BaseModel):
     is_ai: bool
 
 class AnalysisResponse(BaseModel):
+    # `extra="allow"` conserva campos informativos del motor (latency_ms,
+    # sentences_analyzed, persistence_metrics, ...) en vez de descartarlos.
+    model_config = {"extra": "allow"}
+
     audio_path: str
     label: str
+    risk_zone: str = "ZONA_VERDE"
+    action_required: str = "APROBADO_ACCESO_CONCEDIDO"
     overall_risk_ai: float
     max_ai_prob: float
     avg_ai_prob: float

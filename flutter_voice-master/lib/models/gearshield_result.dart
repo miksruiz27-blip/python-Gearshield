@@ -15,13 +15,34 @@ class TimelineItem {
     required this.isAi,
   });
 
+  /// Parser tolerante: el backend puede entregar `prob_ai` en % (contrato
+  /// oficial) o como fracción 0-1 (modos VAD/overlap antiguos, con
+  /// `prob_ai_percentage` e `is_synthetic`/`is_alert_candidate`). Normaliza
+  /// todo a porcentaje + `isAi` para que un campo distinto nunca tire el
+  /// resultado real y obligue al fallback local.
   factory TimelineItem.fromJson(Map<String, dynamic> json) {
+    double toPercent(dynamic v) {
+      final d = (v as num?)?.toDouble() ?? 0.0;
+      return d <= 1.0 ? d * 100.0 : d;
+    }
+
+    final double probAi = json.containsKey('prob_ai_percentage')
+        ? ((json['prob_ai_percentage'] as num?)?.toDouble() ?? 0.0)
+        : toPercent(json['prob_ai'] ?? json['score']);
+    final double probHuman = json['prob_human'] != null
+        ? toPercent(json['prob_human'])
+        : (100.0 - probAi);
+    final bool isAi = (json['is_ai'] as bool?) ??
+        (json['is_synthetic'] as bool?) ??
+        (json['is_alert_candidate'] as bool?) ??
+        (probAi >= 60.0);
+
     return TimelineItem(
-      startSec: (json['start_sec'] as num).toDouble(),
-      endSec: (json['end_sec'] as num).toDouble(),
-      probHuman: (json['prob_human'] as num).toDouble(),
-      probAi: (json['prob_ai'] as num).toDouble(),
-      isAi: json['is_ai'] as bool? ?? false,
+      startSec: (json['start_sec'] as num?)?.toDouble() ?? 0.0,
+      endSec: (json['end_sec'] as num?)?.toDouble() ?? 0.0,
+      probHuman: probHuman.clamp(0.0, 100.0),
+      probAi: probAi.clamp(0.0, 100.0),
+      isAi: isAi,
     );
   }
 }
