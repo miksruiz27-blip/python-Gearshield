@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' show Random;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:file_picker/file_picker.dart';
@@ -57,6 +58,10 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   bool _isReportingBlacklist = false;
   bool _blacklistReportedForCurrentResult = false;
 
+  // Modo Demo: alterna resultados simulados humano (6s) / IA (8s) en cada intento.
+  bool _demoModeEnabled = false;
+  bool _demoNextIsHuman = true;
+
   // State mockup variables for settings
   final bool _autoPdfReport = true;
   final bool _realtimeAlerts = true;
@@ -77,6 +82,12 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
 
     _initSpeech();
     _loadSavedEndpoint();
+    _loadDemoMode();
+  }
+
+  Future<void> _loadDemoMode() async {
+    final enabled = await LocalVaultService.getDemoMode();
+    if (mounted) setState(() => _demoModeEnabled = enabled);
   }
 
   Future<void> _loadSavedEndpoint() async {
@@ -396,6 +407,11 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     required String spokenText,
     required double durationSec,
   }) async {
+    if (_demoModeEnabled) {
+      await _runDemoAnalysis();
+      return;
+    }
+
     GearShieldResult? result;
     try {
       // Análisis remoto con tope global; si excede, motor local.
@@ -440,6 +456,76 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
         }
       }
     }
+  }
+
+  /// Pipeline de análisis simulado para el Modo Demo: no toca red ni motor
+  /// local, solo alterna entre un resultado humano (6s) y uno de IA (8s)
+  /// cada vez que se completa un intento (grabación o archivo subido).
+  Future<void> _runDemoAnalysis() async {
+    final bool isHumanTurn = _demoNextIsHuman;
+
+    // Pequeña espera artificial para que se sienta como un análisis real.
+    await Future.delayed(const Duration(milliseconds: 900));
+    if (!mounted) return;
+
+    final GearShieldResult result = isHumanTurn ? _buildDemoHumanResult() : _buildDemoAiResult();
+
+    setState(() {
+      _isAnalyzing = false;
+      _latestResult = result;
+      _blacklistReportedForCurrentResult = false;
+      _demoNextIsHuman = !isHumanTurn;
+      _selectedNavIndex = 1;
+    });
+  }
+
+  List<TimelineItem> _buildDemoTimeline(double durationSec, double baseAiProb) {
+    final int chunks = (durationSec / 1.5).ceil();
+    return List.generate(chunks, (i) {
+      final double start = i * 1.5;
+      final double end = (start + 1.5).clamp(0.0, durationSec).toDouble();
+      final double variation = (Random().nextDouble() - 0.5) * 6.0;
+      final double aiProb = (baseAiProb + variation).clamp(0.5, 99.5);
+      return TimelineItem(
+        startSec: start,
+        endSec: end,
+        probHuman: 100.0 - aiProb,
+        probAi: aiProb,
+        isAi: aiProb >= 60.0,
+      );
+    });
+  }
+
+  GearShieldResult _buildDemoHumanResult() {
+    const double duration = 6.0;
+    final double overallRisk = 6.0 + Random().nextDouble() * 8.0; // 6% - 14%
+    return GearShieldResult(
+      audioPath: 'demo_humano_6s.wav',
+      label: 'Voz Orgánica Humana (Modo Demo · 6s)',
+      riskZone: 'ZONA_VERDE',
+      actionRequired: 'APROBADO_ACCESO_CONCEDIDO',
+      overallRiskAi: overallRisk,
+      maxAiProb: overallRisk + 5.0,
+      avgAiProb: overallRisk,
+      aiDetectedIntervals: const [],
+      timeline: _buildDemoTimeline(duration, overallRisk),
+    );
+  }
+
+  GearShieldResult _buildDemoAiResult() {
+    const double duration = 8.0;
+    final double overallRisk = 88.0 + Random().nextDouble() * 10.0; // 88% - 98%
+    return GearShieldResult(
+      audioPath: 'demo_ia_8s.wav',
+      label: 'INTELIGENCIA ARTIFICIAL (100% Sintético / Deepfake) (Modo Demo · 8s)',
+      riskZone: 'ZONA_ROJA',
+      actionRequired: 'BLOQUEO_ALERTA_DEEPFAKE',
+      overallRiskAi: overallRisk,
+      maxAiProb: (overallRisk + 4.0).clamp(0.0, 99.5),
+      avgAiProb: overallRisk - 3.0,
+      aiDetectedIntervals: const [],
+      timeline: _buildDemoTimeline(duration, overallRisk),
+    );
   }
 
   @override
@@ -1550,6 +1636,106 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     );
   }
 
+  /// Widget de Modo Demo: al activarlo, cada intento de análisis (grabación
+  /// o archivo subido) devuelve un resultado simulado en vez de llamar al
+  /// backend/motor local, alternando humano (6s, verde) / IA (8s, rojo).
+  Widget _buildDemoModeWidget() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: VocalisTheme.glassCardDecoration(
+        borderColor: _demoModeEnabled ? VocalisTheme.primary.withValues(alpha: 0.4) : VocalisTheme.glassBorderSubtle,
+        borderRadius: 18,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: VocalisTheme.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.play_circle_fill_rounded, color: VocalisTheme.primary, size: 20),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Modo Demo (Presentación)',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: VocalisTheme.textPrimary),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Simula resultados en bucle: humano (6s) y luego IA (8s), sin usar red ni micrófono real.',
+                      style: TextStyle(fontSize: 11, color: VocalisTheme.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: _demoModeEnabled,
+                activeThumbColor: VocalisTheme.primary,
+                onChanged: (val) {
+                  setState(() {
+                    _demoModeEnabled = val;
+                    _demoNextIsHuman = true;
+                  });
+                  LocalVaultService.saveDemoMode(val);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(val
+                          ? 'Modo Demo activado: el próximo intento saldrá en VERDE (humano).'
+                          : 'Modo Demo desactivado. Vuelve al análisis real.'),
+                      backgroundColor: val ? VocalisTheme.accentEmerald : VocalisTheme.textSecondary,
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          if (_demoModeEnabled) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: (_demoNextIsHuman ? VocalisTheme.accentEmerald : VocalisTheme.error).withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: (_demoNextIsHuman ? VocalisTheme.accentEmerald : VocalisTheme.error).withValues(alpha: 0.3),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _demoNextIsHuman ? Icons.check_circle_rounded : Icons.gpp_bad_rounded,
+                    size: 16,
+                    color: _demoNextIsHuman ? VocalisTheme.accentEmerald : VocalisTheme.error,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _demoNextIsHuman
+                        ? 'Próximo intento: VERDE — Voz Humana (6s)'
+                        : 'Próximo intento: ROJO — Voz IA (8s)',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: _demoNextIsHuman ? VocalisTheme.accentEmerald : VocalisTheme.error,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   // ==========================================
   // PANTALLA 4: SETTINGS (Ajustes Rediseñados)
   // ==========================================
@@ -1604,6 +1790,13 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
             ],
           ),
         ),
+
+        const SizedBox(height: 20),
+
+        // 2.5. SECCIÓN MODO DEMO / PRUEBA
+        _buildSettingsSectionHeader('MODO DEMO / PRUEBA', Icons.play_circle_outline_rounded),
+        const SizedBox(height: 8),
+        _buildDemoModeWidget(),
 
         const SizedBox(height: 20),
 

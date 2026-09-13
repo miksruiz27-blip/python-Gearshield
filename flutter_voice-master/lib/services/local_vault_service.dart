@@ -90,4 +90,23 @@ class LocalVaultService {
     } catch (_) {}
     return null;
   }
+
+  static const String _demoModeKey = 'gearshield_demo_mode_enabled';
+
+  /// Guarda si el Modo Demo (resultados simulados humano/IA en bucle) está activo.
+  static Future<void> saveDemoMode(bool enabled) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_demoModeKey, enabled);
+    } catch (_) {}
+  }
+
+  static Future<bool> getDemoMode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(_demoModeKey) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 }
