@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/admin_stats.dart';
 import '../models/gearshield_result.dart';
@@ -10,28 +10,32 @@ import 'hive_service.dart';
 
 class GearShieldService {
   // Endpoints configurables (Railway Cloud URL principal con fallback local).
-  // El usuario puede sobreescribir la URL desde Ajustes > "URL de API Servidor"
-  // (necesario en celular físico: 127.0.0.1 apunta al propio teléfono, hay que
-  // usar la IP LAN de la PC, p.ej. http://192.168.1.50:8000).
+  // El usuario puede sobreescribir la URL desde Ajustes > "URL de API Servidor".
   static const String _cloudUrl = 'https://python-gearshield-production.up.railway.app';
   static const String _localUrl = 'http://127.0.0.1:8000';
   static String? _customUrl;
 
-  // Offline-First: Priorizar servidor local sobre la nube
-  static String get _baseUrl => _customUrl ?? _localUrl;
+  // En Web o producción priorizar Railway Cloud, en local dev usar _localUrl.
+  static String get defaultUrl => kIsWeb ? _cloudUrl : _localUrl;
+
+  static String get _baseUrl => _customUrl ?? defaultUrl;
 
   /// URL activa que se muestra en Ajustes
   static String get activeBaseUrl => _baseUrl;
 
-  /// Candidatos a probar en orden para /analyze (Offline-First):
-  /// 1. URL Personalizada / IP LAN local
-  /// 2. Servidor Local (http://127.0.0.1:8000)
-  /// 3. Servidor Cloud de respaldo (Railway)
+  /// Candidatos a probar en orden para /analyze:
+  /// 1. URL Personalizada si existe
+  /// 2. Servidor Cloud / Servidor Local según la plataforma
   static List<String> get _analyzeCandidates {
     final urls = <String>[];
     if (_customUrl != null && _customUrl!.isNotEmpty) urls.add(_customUrl!);
-    urls.add(_localUrl);
-    urls.add(_cloudUrl);
+    if (kIsWeb) {
+      urls.add(_cloudUrl);
+      urls.add(_localUrl);
+    } else {
+      urls.add(_localUrl);
+      urls.add(_cloudUrl);
+    }
     return urls.toSet().toList();
   }
 
@@ -76,7 +80,7 @@ class GearShieldService {
       if (response.statusCode == 200) {
         final String token = body['access_token'] ?? '';
         final String username = body['user']?['username'] ?? email.split('@')[0];
-        await HiveService.saveUserSession(token, username);
+        await HiveService.saveUserSessionFull(token, username, email);
         return {'success': true, 'message': body['message'] ?? 'Inicio de sesión exitoso', 'user': body['user']};
       } else {
         return {'success': false, 'message': body['detail'] ?? 'Error de autenticación'};
@@ -84,7 +88,7 @@ class GearShieldService {
     } catch (e) {
       // Fallback si el servidor está inaccesible pero es el usuario de prueba
       if (email.trim() == 'juanperez@gmail.com' && password.trim() == '12345') {
-        await HiveService.saveUserSession('mock_jwt_token_juanperez', 'juanperez');
+        await HiveService.saveUserSessionFull('mock_jwt_token_juanperez', 'juanperez', email);
         return {
           'success': true,
           'message': 'Inicio de sesión exitoso (Offline Demo)',
@@ -109,7 +113,7 @@ class GearShieldService {
       if (response.statusCode == 200) {
         final String token = body['access_token'] ?? '';
         final String username = body['user']?['username'] ?? email.split('@')[0];
-        await HiveService.saveUserSession(token, username);
+        await HiveService.saveUserSessionFull(token, username, email);
         return {'success': true, 'message': body['message'] ?? 'Registro exitoso', 'user': body['user']};
       } else {
         return {'success': false, 'message': body['detail'] ?? 'Error al registrar usuario'};
@@ -148,21 +152,30 @@ class GearShieldService {
   /// tiene timeout propio y cualquier error termina en el motor local.
   static Future<GearShieldResult> analyzeVoice({
     String? audioPath,
+    List<int>? audioBytes,
     String spokenText = '',
     double durationSeconds = 3.0,
   }) async {
-    bool fileOk = false;
-    try {
-      fileOk = audioPath != null && audioPath.isNotEmpty && File(audioPath).existsSync();
-    } catch (e) {
-      print('[GearShieldService] No se pudo verificar el archivo de audio: $e');
-    }
+    bool fileOk = (audioPath != null && audioPath.isNotEmpty) || (audioBytes != null && audioBytes.isNotEmpty);
 
     if (fileOk) {
       for (final base in _analyzeCandidates) {
         try {
           var request = http.MultipartRequest('POST', Uri.parse('$base/analyze'));
-          request.files.add(await http.MultipartFile.fromPath('file', audioPath!));
+          if (audioBytes != null && audioBytes.isNotEmpty) {
+            request.files.add(http.MultipartFile.fromBytes(
+              'file',
+              audioBytes,
+              filename: 'audio.wav',
+            ));
+          } else if (audioPath != null && audioPath.isNotEmpty) {
+            if (kIsWeb) {
+              // En web las rutas locales del sistema de archivos no son accesibles directamente
+              continue;
+            } else {
+              request.files.add(await http.MultipartFile.fromPath('file', audioPath));
+            }
+          }
 
           // El backend procesa el audio completo antes de responder cabeceras,
           // por eso el timeout de send() debe cubrir la inferencia (no sólo la conexión).
@@ -177,13 +190,13 @@ class GearShieldService {
             await LocalVaultService.saveResult(result);
             return result;
           }
-          print('[GearShieldService] $base/analyze respondió HTTP ${streamedResponse.statusCode}. Probando siguiente URL.');
+          debugPrint('[GearShieldService] $base/analyze respondió HTTP ${streamedResponse.statusCode}. Probando siguiente URL.');
         } catch (e) {
           // Imprimir error de conexión y probar el siguiente endpoint
-          print('[GearShieldService] $base no disponible: $e.');
+          debugPrint('[GearShieldService] $base no disponible: $e.');
         }
       }
-      print('[GearShieldService] Ningún servidor respondió. Usando motor biofísico local.');
+      debugPrint('[GearShieldService] Ningún servidor respondió. Usando motor biofísico local.');
     }
 
     return runLocalFallback(
@@ -291,7 +304,7 @@ class GearShieldService {
         return AdminStats.fromJson(jsonMap);
       }
     } catch (e) {
-      print('[GearShieldService] Error obteniendo stats: $e. Usando fallback offline.');
+      debugPrint('[GearShieldService] Error obteniendo stats: $e. Usando fallback offline.');
     }
     return AdminStats.fallback();
   }
@@ -307,7 +320,7 @@ class GearShieldService {
         return listMap.map((item) => DetectionLogEntry.fromJson(item)).toList();
       }
     } catch (e) {
-      print('[GearShieldService] Error obteniendo logs: $e. Usando lista fallback offline.');
+      debugPrint('[GearShieldService] Error obteniendo logs: $e. Usando lista fallback offline.');
     }
 
     // Datos offline de respaldo
@@ -368,6 +381,28 @@ class GearShieldService {
     ];
   }
 
+  /// Genera un certificado forense en PDF en el backend (Railway) y devuelve
+  /// los bytes del archivo, o null si el servidor no está disponible.
+  static Future<Uint8List?> exportForensicPdf(Map<String, dynamic> analysisData, {int? userId}) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/generate-pdf${userId != null ? '?user_id=$userId' : ''}'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(analysisData),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      if (response.statusCode == 200) {
+        return response.bodyBytes;
+      }
+      debugPrint('[GearShieldService] /generate-pdf respondió HTTP ${response.statusCode}: ${response.body}');
+    } catch (e) {
+      debugPrint('[GearShieldService] Error exportando PDF: $e');
+    }
+    return null;
+  }
+
   /// Envía un reporte de falso positivo al backend
   static Future<bool> reportFalsePositive(String logId, String reason) async {
     try {
@@ -380,7 +415,7 @@ class GearShieldService {
           .timeout(const Duration(seconds: 4));
       return response.statusCode == 200;
     } catch (e) {
-      print('[GearShieldService] Error enviando falso positivo: $e');
+      debugPrint('[GearShieldService] Error enviando falso positivo: $e');
       return false;
     }
   }

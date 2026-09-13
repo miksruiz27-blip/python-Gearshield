@@ -105,4 +105,28 @@ class GearShieldResult {
       timeline: const [],
     );
   }
+
+  /// Serializa al mismo contrato que consume `pdf_generator.py` en el
+  /// backend (audio_path, overall_risk_ai, label, ai_detected_intervals, timeline).
+  Map<String, dynamic> toJson() {
+    return {
+      'audio_path': audioPath,
+      'label': label,
+      'risk_zone': riskZone,
+      'action_required': actionRequired,
+      'overall_risk_ai': overallRiskAi,
+      'max_ai_prob': maxAiProb,
+      'avg_ai_prob': avgAiProb,
+      'ai_detected_intervals': aiDetectedIntervals,
+      'timeline': timeline
+          .map((t) => {
+                'start_sec': t.startSec,
+                'end_sec': t.endSec,
+                'prob_human': t.probHuman,
+                'prob_ai': t.probAi,
+                'is_ai': t.isAi,
+              })
+          .toList(),
+    };
+  }
 }

@@ -1,5 +1,6 @@
 import 'package:hive/hive.dart';
 import '../models/pdf_report_item.dart';
+import 'local_vault_service.dart';
 
 class HiveService {
   static final Box<PdfReportItem> _pdfBox = Hive.box<PdfReportItem>('pdf_reports_box');
@@ -22,8 +23,29 @@ class HiveService {
 
   static String? getToken() => _sessionBox.get('token');
   static String? getUsername() => _sessionBox.get('username');
+  static String? getEmail() => _sessionBox.get('email');
+
+  /// Un usuario es "invitado" si nunca inició sesión ni se registró
+  /// (no hay token guardado en la bóveda local).
+  static bool isGuest() => getToken() == null;
+
+  static Future<void> saveUserSessionFull(String token, String username, String email) async {
+    await _sessionBox.put('token', token);
+    await _sessionBox.put('username', username);
+    await _sessionBox.put('email', email);
+  }
+
+  static Future<void> updateUserData(String username) async {
+    await _sessionBox.put('username', username);
+  }
 
   static Future<void> logout() async {
     await _sessionBox.clear();
+  }
+
+  static Future<void> deleteAccount() async {
+    await _sessionBox.clear();
+    await _pdfBox.clear();
+    await LocalVaultService.clearVault();
   }
 }

@@ -1,11 +1,11 @@
 {
-    "name": "flutter_voice",
-    "short_name": "flutter_voice",
+    "name": "GearShield 2.0",
+    "short_name": "GearShield",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#0F172A",
+    "theme_color": "#3525CD",
+    "description": "GearShield 2.0 - Biometric Voice Security & AI Audit Suite",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

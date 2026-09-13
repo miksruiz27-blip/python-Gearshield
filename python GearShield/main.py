@@ -12,7 +12,11 @@ from typing import Optional
 
 import base64
 import io
+import httpx
 import soundfile as sf
+from dotenv import load_dotenv
+
+load_dotenv()
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -299,6 +303,125 @@ def delete_user_account(payload: DeleteAccountRequest, db: Session = Depends(dat
 class DetectResponse(BaseModel):
     is_synthetic: bool
     confidence: float
+
+# ============================================================
+# GEMINI AI - Explicabilidad Forense & Orquestador GenUI
+# ============================================================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+class GeminiExplainRequest(BaseModel):
+    overall_risk_ai: float
+    max_ai_prob: float
+    avg_ai_prob: float = 0.0
+    label: str = ""
+
+class GeminiGenUiRequest(BaseModel):
+    query: str
+    overall_risk_ai: float = 0.0
+    max_ai_prob: float = 0.0
+    label: str = ""
+
+async def _call_gemini(prompt: str, schema: dict) -> dict:
+    """Llama a la API de Gemini pidiendo salida JSON estructurada según `schema`."""
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY no configurada en el servidor.")
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+            "temperature": 0.4,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(GEMINI_API_URL, params={"key": GEMINI_API_KEY}, json=payload)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Tiempo de espera agotado llamando a Gemini API.")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Error de Gemini API ({resp.status_code}): {resp.text[:300]}")
+
+    data = resp.json()
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text)
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        raise HTTPException(status_code=502, detail=f"Respuesta inesperada de Gemini: {e}")
+
+@app.post("/gemini/forensic-explanation", summary="Explicación Forense Generada por Gemini AI")
+async def gemini_forensic_explanation(payload: GeminiExplainRequest):
+    """
+    Genera (con Gemini real, no simulado) el dictamen forense de 2do nivel
+    que antes estaba hardcodeado en el cliente Flutter.
+    """
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "status": {"type": "STRING"},
+            "badge": {"type": "STRING"},
+            "title": {"type": "STRING"},
+            "summary": {"type": "STRING"},
+            "findings": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "action_recommendation": {"type": "STRING"},
+            "confidence_score": {"type": "STRING"},
+        },
+        "required": ["status", "badge", "title", "summary", "findings", "action_recommendation", "confidence_score"],
+    }
+    prompt = (
+        "Eres el motor forense de segundo nivel de GearShield, un sistema de deteccion de voz "
+        "sintetica/deepfake en llamadas telefonicas.\n\n"
+        f"Metricas del motor biometrico ONNX para este clip:\n"
+        f"- Riesgo IA global: {payload.overall_risk_ai:.1f}%\n"
+        f"- Probabilidad maxima de IA en una ventana: {payload.max_ai_prob:.1f}%\n"
+        f"- Probabilidad promedio de IA: {payload.avg_ai_prob:.1f}%\n"
+        f"- Etiqueta del motor: {payload.label}\n\n"
+        "Genera un dictamen forense breve, tecnico y creible en espanol, en el tono de un analista "
+        "de seguridad biometrica de voz. No contradigas las metricas dadas (si el riesgo es bajo, "
+        "el dictamen debe ser de aprobacion; si es alto, de alerta). Responde SOLO con el JSON solicitado."
+    )
+    return await _call_gemini(prompt, schema)
+
+@app.post("/gemini/genui-intent", summary="Orquestador GenUI: Gemini decide que widgets renderizar")
+async def gemini_genui_intent(payload: GeminiGenUiRequest):
+    """
+    GenUI real: Gemini interpreta una peticion en lenguaje natural del analista
+    y decide dinamicamente que widgets del panel activar.
+    """
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "intent": {"type": "STRING"},
+            "response_text": {"type": "STRING"},
+            "widgets": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "risk_prob": {"type": "NUMBER"},
+        },
+        "required": ["intent", "response_text", "widgets", "risk_prob"],
+    }
+    prompt = (
+        "Eres el orquestador GenUI de GearShield: decides QUE widgets mostrar en un panel de "
+        "seguridad biometrica de voz, segun lo que pide el usuario en lenguaje natural.\n\n"
+        "Widgets disponibles (usa EXACTAMENTE estos strings, elige entre 1 y 6):\n"
+        '- "spectrogram": visor de espectrograma forense\n'
+        '- "gauge": medidor radial de riesgo de IA\n'
+        '- "ab_player": comparador de audio A/B (voz real vs sospechosa)\n'
+        '- "gemini_note": nota de explicabilidad forense generada por IA\n'
+        '- "pdf_preview": generador de certificado PDF de auditoria\n'
+        '- "audit_stats": resumen de estadisticas de auditoria (llamadas totales, falsos positivos)\n\n'
+        f"Contexto actual del analisis:\n"
+        f"- Riesgo IA global: {payload.overall_risk_ai:.1f}%\n"
+        f"- Probabilidad maxima de IA: {payload.max_ai_prob:.1f}%\n"
+        f"- Etiqueta: {payload.label}\n\n"
+        f'Peticion del usuario: "{payload.query}"\n\n'
+        "Responde SOLO con el JSON: intent (una palabra en mayusculas, ej. EXPLANATION, SPECTROGRAM, "
+        "PDF_EXPORT, COMPARISON, AUDIT_STATS), response_text (una frase en espanol confirmando que vas "
+        "a mostrar), widgets (lista de 1 a 5 strings del vocabulario de arriba), risk_prob (usa el "
+        "riesgo IA global dado arriba, no inventes otro numero)."
+    )
+    return await _call_gemini(prompt, schema)
 
 @app.get("/health", summary="Estado del Servidor y Motor")
 def health_check():
