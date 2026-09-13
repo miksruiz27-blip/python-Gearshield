@@ -24,8 +24,12 @@ from pdf_generator import generate_forensic_pdf
 import database
 import models
 
-# Inicializar tablas de la Base de Datos (PostgreSQL en Railway / SQLite local)
-models.Base.metadata.create_all(bind=database.engine)
+# Inicializar tablas de la Base de Datos con manejo de errores seguro
+try:
+    models.Base.metadata.create_all(bind=database.engine)
+    print("[OK] Tablas de la Base de Datos verificadas/creadas correctamente.")
+except Exception as e:
+    print(f"[WARNING] No se pudo conectar a la base de datos inmediatamente: {e}")
 
 app = FastAPI(
     title="GearShield Security Engine API",
