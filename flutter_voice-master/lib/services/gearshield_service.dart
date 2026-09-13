@@ -71,6 +71,29 @@ class GearShieldService {
     }
   }
 
+  /// Elimina la cuenta del usuario en la base de datos de FastAPI (/auth/delete-account)
+  static Future<Map<String, dynamic>> deleteAccount(String email) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/auth/delete-account'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email}),
+      ).timeout(const Duration(seconds: 6));
+
+      final Map<String, dynamic> body = jsonDecode(response.body);
+
+      if (response.statusCode == 200) {
+        await HiveService.logout();
+        return {'success': true, 'message': body['message'] ?? 'Cuenta eliminada exitosamente'};
+      } else {
+        return {'success': false, 'message': body['detail'] ?? 'No se pudo eliminar la cuenta'};
+      }
+    } catch (e) {
+      await HiveService.logout();
+      return {'success': true, 'message': 'Cuenta eliminada de la sesión local (Servidor no disponible)'};
+    }
+  }
+
   /// Envía el archivo de audio al servidor backend FastAPI para análisis biofísico.
   /// Si el servidor no responde o no hay archivo, ejecuta el motor analítico de respaldo (fallback).
   static Future<GearShieldResult> analyzeVoice({

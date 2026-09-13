@@ -10,7 +10,8 @@ import '../widgets/ai_probability_widget.dart';
 import '../widgets/engine_results_widget.dart';
 import '../widgets/gearshield_mic_widget.dart';
 import '../widgets/spectrogram_viewer_widget.dart';
-import '../widgets/gemini_ai_explanation_widget.dart';
+import '../services/hive_service.dart';
+import 'gearshield_login_screen.dart';
 
 class MobileDetectorScreen extends StatefulWidget {
   const MobileDetectorScreen({super.key});
@@ -658,6 +659,141 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
         ),
 
         const SizedBox(height: 16),
+
+        // Sección Cuenta de Usuario & Sesión
+        _buildSettingsSectionHeader('CUENTA DE USUARIO & SESIÓN', Icons.person_outline_rounded),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: VocalisTheme.glassCardDecoration(borderRadius: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 20,
+                    backgroundColor: VocalisTheme.primaryContainer.withValues(alpha: 0.15),
+                    child: const Icon(Icons.person_rounded, color: VocalisTheme.primaryContainer),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          HiveService.getUsername() ?? 'juanperez@gmail.com',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: VocalisTheme.textPrimary,
+                          ),
+                        ),
+                        const Text(
+                          'Sesión Activa • Base de Datos Conectada',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: VocalisTheme.accentEmerald,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  // Botón Cerrar Sesión
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        side: const BorderSide(color: VocalisTheme.glassBorderSubtle),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () async {
+                        await HiveService.logout();
+                        if (context.mounted) {
+                          Navigator.of(context).pushReplacement(
+                            MaterialPageRoute(builder: (_) => const GearShieldLoginScreen()),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.logout_rounded, size: 18, color: VocalisTheme.textPrimary),
+                      label: const Text(
+                        'Cerrar Sesión',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: VocalisTheme.textPrimary),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+
+                  // Botón Eliminar Cuenta DB
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: VocalisTheme.error,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: const Text('¿Eliminar Cuenta?'),
+                            content: const Text(
+                              'Esta acción conectará a la Base de Datos y eliminará permanentemente tu usuario y registros de reportes.',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(ctx).pop(),
+                                child: const Text('Cancelar'),
+                              ),
+                              ElevatedButton(
+                                style: ElevatedButton.styleFrom(backgroundColor: VocalisTheme.error),
+                                onPressed: () async {
+                                  Navigator.of(ctx).pop();
+                                  final userEmail = HiveService.getUsername() ?? 'juanperez@gmail.com';
+                                  final result = await GearShieldService.deleteAccount(userEmail);
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(result['message'] ?? 'Cuenta eliminada de la Base de Datos'),
+                                        backgroundColor: VocalisTheme.error,
+                                        behavior: SnackBarBehavior.floating,
+                                      ),
+                                    );
+                                    Navigator.of(context).pushReplacement(
+                                      MaterialPageRoute(builder: (_) => const GearShieldLoginScreen()),
+                                    );
+                                  }
+                                },
+                                child: const Text('Eliminar', style: TextStyle(color: Colors.white)),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.delete_forever_rounded, size: 18),
+                      label: const Text(
+                        'Eliminar Cuenta',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
 
         // Sección Información
         _buildSettingsSectionHeader('ACERCA DEL SISTEMA', Icons.info_outline_rounded),

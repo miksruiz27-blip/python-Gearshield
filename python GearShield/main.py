@@ -261,6 +261,33 @@ def login_user(payload: LoginRequest, db: Session = Depends(database.get_db)):
         }
     }
 
+class DeleteAccountRequest(BaseModel):
+    email: str
+
+@app.post("/auth/delete-account", summary="Eliminar Cuenta de Usuario")
+@app.delete("/auth/delete-account", summary="Eliminar Cuenta de Usuario")
+def delete_user_account(payload: DeleteAccountRequest, db: Session = Depends(database.get_db)):
+    user = db.query(models.User).filter(
+        (models.User.email == payload.email) | (models.User.username == payload.email)
+    ).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="El usuario no fue encontrado en la base de datos.")
+    
+    # Eliminar reportes asignados a este usuario
+    try:
+        db.query(models.PdfExport).filter(models.PdfExport.user_id == user.id).delete()
+    except Exception:
+        pass
+
+    db.delete(user)
+    db.commit()
+    
+    return {
+        "status": "success",
+        "message": f"Cuenta del usuario '{payload.email}' eliminada permanentemente de la base de datos."
+    }
+
 class DetectResponse(BaseModel):
     is_synthetic: bool
     confidence: float
