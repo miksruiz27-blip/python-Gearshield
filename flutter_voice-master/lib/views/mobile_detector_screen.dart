@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
@@ -124,6 +125,26 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     super.dispose();
   }
 
+  // Busca un micrófono externo (USB o auriculares con cable) entre los
+  // dispositivos de entrada disponibles. `record` no enruta automáticamente
+  // a un micrófono USB conectado al celular: hay que seleccionarlo de forma
+  // explícita en el RecordConfig o el sistema se queda con el micrófono
+  // integrado del teléfono aunque el USB esté conectado.
+  Future<InputDevice?> _pickExternalInputDevice() async {
+    try {
+      final devices = await _audioRecorder.listInputDevices();
+      for (final d in devices) {
+        if (d.type == InputDeviceType.usb) return d;
+      }
+      for (final d in devices) {
+        if (d.type == InputDeviceType.wiredHeadset) return d;
+      }
+    } catch (e) {
+      print('[MobileDetectorScreen] Error listando dispositivos de entrada: $e');
+    }
+    return null;
+  }
+
   void _toggleListening() {
     if (!_isListening) {
       _startListening();
@@ -133,25 +154,47 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   }
 
   void _startListening() async {
+    // 1. Solicitar permiso de micrófono explícitamente en dispositivos móviles físicos
+    try {
+      final micStatus = await Permission.microphone.request();
+      if (!micStatus.isGranted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Permiso de micrófono no concedido. Por favor habilítalo en los ajustes del dispositivo.'),
+              backgroundColor: VocalisTheme.error,
+            ),
+          );
+        }
+        return;
+      }
+    } catch (e) {
+      print('[MobileDetectorScreen] Fallback al verificar permiso: $e');
+    }
+
     setState(() {
       _isListening = true;
-      _spokenText = '';
+      _spokenText = 'Escuchando audio... (Grabación en curso)';
       _latestResult = null;
       _startTime = DateTime.now();
     });
 
     bool recordedStarted = false;
+    InputDevice? externalDevice;
     try {
       if (await _audioRecorder.hasPermission()) {
+        externalDevice = await _pickExternalInputDevice();
+
         final tempDir = await getTemporaryDirectory();
         _recordedAudioPath =
             '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.wav';
-        
+
         await _audioRecorder.start(
-          const RecordConfig(
+          RecordConfig(
             encoder: AudioEncoder.wav,
             sampleRate: 16000,
             numChannels: 1,
+            device: externalDevice,
           ),
           path: _recordedAudioPath!,
         );
@@ -161,28 +204,38 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
       print('[MobileDetectorScreen] Error en AudioRecorder: $e');
     }
 
-    // SpeechToText para transcripción en pantalla (si el micrófono lo permite en paralelo)
-    try {
-      bool available = await _speech.initialize(
-        onError: (val) {},
-      );
-      if (available) {
-        _speech.listen(
-          onResult: (val) {
-            setState(() {
-              _spokenText = val.recognizedWords;
-              if (val.hasConfidenceRating && val.confidence > 0) {
-                _confidence = val.confidence;
-              }
-            });
-          },
+    // SpeechToText para transcripción en pantalla sólo si hay un micrófono externo.
+    // En el micrófono integrado de un teléfono móvil físico (externalDevice == null),
+    // omitimos _speech.listen() porque el SpeechRecognizer nativo de Android/iOS
+    // solicita acceso exclusivo a AudioRecord y bloquea la captura de _audioRecorder.
+    if (externalDevice != null) {
+      try {
+        bool available = await _speech.initialize(
+          onError: (val) {},
         );
-      }
-    } catch (_) {}
+        if (available) {
+          _speech.listen(
+            onResult: (val) {
+              if (mounted) {
+                setState(() {
+                  if (val.recognizedWords.isNotEmpty) {
+                    _spokenText = val.recognizedWords;
+                  }
+                  if (val.hasConfidenceRating && val.confidence > 0) {
+                    _confidence = val.confidence;
+                  }
+                });
+              }
+            },
+          );
+        }
+      } catch (_) {}
+    }
 
-    if (!recordedStarted && _spokenText.isEmpty) {
+    if (!recordedStarted && mounted) {
       setState(() {
-        _spokenText = 'Grabando audio... (Modo directo)';
+        _spokenText = 'No se pudo iniciar la grabación del micrófono.';
+        _isListening = false;
       });
     }
   }
