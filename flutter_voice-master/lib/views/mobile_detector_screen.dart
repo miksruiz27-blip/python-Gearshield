@@ -54,6 +54,8 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   List<String> _genUiActiveWidgets = ['spectrogram', 'gauge', 'ab_player', 'gemini_note', 'pdf_preview'];
   double _genUiRiskProb = 89.4;
   bool _isExportingPdf = false;
+  bool _isReportingBlacklist = false;
+  bool _blacklistReportedForCurrentResult = false;
 
   // State mockup variables for settings
   final bool _autoPdfReport = true;
@@ -421,6 +423,7 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
           _isAnalyzing = false;
           if (result != null) {
             _latestResult = result;
+            _blacklistReportedForCurrentResult = false;
             // Navega automáticamente a la pestaña de métricas para mostrar el pergamino de resultados
             _selectedNavIndex = 1;
           } else {
@@ -859,6 +862,9 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
                 const SizedBox(width: 8),
                 _buildGenUiPill('📜 Certificado PDF', () => _setGenUiWidgetsLocal(
                     ['pdf_preview'], 'Preparando el certificado PDF de auditoría.'), isDanger: true),
+                const SizedBox(width: 8),
+                _buildGenUiPill('🚫 Lista Negra', () => _setGenUiWidgetsLocal(
+                    ['blacklist_stats'], 'Mostrando el total de intentos de engaño reportados.'), isDanger: true),
               ],
             ),
           ),
@@ -880,8 +886,96 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   /// (o el caso rápido elegido). Vocabulario compartido con el backend
   /// `/gemini/genui-intent`: spectrogram, gauge, ab_player, gemini_note,
   /// pdf_preview, audit_stats.
+  bool get _isRedCase => _activeMetricsResult.riskZone == 'ZONA_ROJA' || _activeMetricsResult.overallRiskAi >= 65.0;
+
+  Future<void> _reportCurrentResultToBlacklist(GearShieldResult result) async {
+    setState(() => _isReportingBlacklist = true);
+    final total = await GearShieldService.reportToBlacklist(result);
+    if (!mounted) return;
+    setState(() {
+      _isReportingBlacklist = false;
+      if (total != null) _blacklistReportedForCurrentResult = true;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(total != null
+            ? 'Voz reportada a la lista negra. Total de intentos: $total'
+            : 'No se pudo reportar: el servidor no respondió.'),
+        backgroundColor: total != null ? VocalisTheme.accentEmerald : VocalisTheme.error,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   List<Widget> _buildGenUiWidgetDeck(GearShieldResult result) {
     final List<Widget> deck = [];
+
+    // Caso rojo detectado: GenUI ofrece automáticamente reportar a lista negra.
+    if (_isRedCase) {
+      deck.add(Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: VocalisTheme.error.withValues(alpha: 0.5), width: 2),
+          boxShadow: [
+            BoxShadow(color: VocalisTheme.error.withValues(alpha: 0.08), blurRadius: 16, offset: const Offset(0, 4)),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: const [
+                Icon(Icons.report_gmailerrorred_rounded, color: VocalisTheme.error, size: 22),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'GenUI: Caso de Alto Riesgo Detectado',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: VocalisTheme.error),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Riesgo IA: ${result.overallRiskAi.toStringAsFixed(1)}% • ${result.label}',
+              style: const TextStyle(fontSize: 11, color: VocalisTheme.textSecondary),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _blacklistReportedForCurrentResult ? VocalisTheme.accentEmerald : VocalisTheme.error,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: (_isReportingBlacklist || _blacklistReportedForCurrentResult)
+                    ? null
+                    : () => _reportCurrentResultToBlacklist(result),
+                icon: _isReportingBlacklist
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
+                    : Icon(_blacklistReportedForCurrentResult ? Icons.check_circle_rounded : Icons.gpp_bad_rounded, size: 18),
+                label: Text(
+                  _blacklistReportedForCurrentResult
+                      ? 'Reportado a Lista Negra'
+                      : (_isReportingBlacklist ? 'Reportando...' : 'Reportar a Lista Negra'),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ));
+      deck.add(const SizedBox(height: 16));
+    }
 
     if (_genUiActiveWidgets.contains('spectrogram')) {
       deck.add(Container(
@@ -999,6 +1093,60 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
         padding: const EdgeInsets.all(16),
         decoration: VocalisTheme.glassCardDecoration(borderRadius: 20),
         child: const AuditStatsWidget(),
+      ));
+      deck.add(const SizedBox(height: 16));
+    }
+
+    if (_genUiActiveWidgets.contains('blacklist_stats')) {
+      deck.add(Container(
+        padding: const EdgeInsets.all(16),
+        decoration: VocalisTheme.glassCardDecoration(borderRadius: 20),
+        child: FutureBuilder<int>(
+          future: GearShieldService.fetchBlacklistTotal(),
+          builder: (context, snapshot) {
+            final total = snapshot.data;
+            return Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: VocalisTheme.error.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Icon(Icons.gpp_bad_rounded, color: VocalisTheme.error, size: 24),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Total de Intentos de Engaño',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: VocalisTheme.textSecondary),
+                      ),
+                      const SizedBox(height: 4),
+                      snapshot.connectionState == ConnectionState.waiting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: VocalisTheme.error),
+                            )
+                          : Text(
+                              '${total ?? 0}',
+                              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: VocalisTheme.error),
+                            ),
+                      const Text(
+                        'Voces reportadas a la lista negra',
+                        style: TextStyle(fontSize: 10, color: VocalisTheme.textTertiary),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
       ));
       deck.add(const SizedBox(height: 16));
     }

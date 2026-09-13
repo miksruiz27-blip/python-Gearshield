@@ -403,6 +403,51 @@ class GearShieldService {
     return null;
   }
 
+  /// Reporta una voz de alto riesgo a la lista negra de intentos de fraude.
+  /// Devuelve el conteo total actualizado, o null si el servidor no respondió.
+  static Future<int?> reportToBlacklist(GearShieldResult result, {String? note}) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/blacklist/report'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'audio_path': result.audioPath,
+              'label': result.label,
+              'overall_risk_ai': result.overallRiskAi,
+              'max_ai_prob': result.maxAiProb,
+              'reporter_note': note,
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> body = jsonDecode(response.body);
+        return (body['total_reports'] as num?)?.toInt();
+      }
+      debugPrint('[GearShieldService] /blacklist/report respondió HTTP ${response.statusCode}: ${response.body}');
+    } catch (e) {
+      debugPrint('[GearShieldService] Error reportando a lista negra: $e');
+    }
+    return null;
+  }
+
+  /// Consulta el total de intentos de engaño reportados a la lista negra.
+  static Future<int> fetchBlacklistTotal() async {
+    try {
+      final response = await http
+          .get(Uri.parse('$_baseUrl/blacklist/stats'))
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> body = jsonDecode(response.body);
+        return (body['total_reports'] as num?)?.toInt() ?? 0;
+      }
+    } catch (e) {
+      debugPrint('[GearShieldService] Error obteniendo stats de lista negra: $e');
+    }
+    return 0;
+  }
+
   /// Envía un reporte de falso positivo al backend
   static Future<bool> reportFalsePositive(String logId, String reason) async {
     try {

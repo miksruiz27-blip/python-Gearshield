@@ -11,8 +11,13 @@ raw_db_url = os.getenv("DATABASE_URL", "sqlite:///./gearshield.db").strip()
 if raw_db_url.startswith("postgres://"):
     raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
 
-# Corregir puerto vacío si la URL termina en dos puntos o tiene puerto incompleto (ej. host:/db)
-raw_db_url = re.sub(r':(?=/|$)', '', raw_db_url)
+# Corregir puerto vacío si la URL termina en dos puntos o tiene puerto incompleto (ej. host:/db).
+# Se aplica solo despues del separador "://" para no borrar ese mismo ":" en URLs validas
+# (postgresql://user:pass@host:5432/db nunca debe perder el ":" del esquema).
+if "://" in raw_db_url:
+    _scheme, _rest = raw_db_url.split("://", 1)
+    _rest = re.sub(r':(?=/|$)', '', _rest)
+    raw_db_url = f"{_scheme}://{_rest}"
 
 try:
     engine = create_engine(

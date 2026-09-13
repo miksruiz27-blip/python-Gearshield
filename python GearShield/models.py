@@ -30,3 +30,15 @@ class PdfExport(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User", back_populates="pdf_reports")
+
+class BlacklistReport(Base):
+    __tablename__ = "blacklist_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    audio_path = Column(String, nullable=True)
+    label = Column(String, nullable=True)
+    overall_risk_ai = Column(Float, default=0.0)
+    max_ai_prob = Column(Float, default=0.0)
+    reporter_note = Column(String, nullable=True)
+    reported_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

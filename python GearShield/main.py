@@ -404,13 +404,14 @@ async def gemini_genui_intent(payload: GeminiGenUiRequest):
     prompt = (
         "Eres el orquestador GenUI de GearShield: decides QUE widgets mostrar en un panel de "
         "seguridad biometrica de voz, segun lo que pide el usuario en lenguaje natural.\n\n"
-        "Widgets disponibles (usa EXACTAMENTE estos strings, elige entre 1 y 6):\n"
+        "Widgets disponibles (usa EXACTAMENTE estos strings, elige entre 1 y 7):\n"
         '- "spectrogram": visor de espectrograma forense\n'
         '- "gauge": medidor radial de riesgo de IA\n'
         '- "ab_player": comparador de audio A/B (voz real vs sospechosa)\n'
         '- "gemini_note": nota de explicabilidad forense generada por IA\n'
         '- "pdf_preview": generador de certificado PDF de auditoria\n'
-        '- "audit_stats": resumen de estadisticas de auditoria (llamadas totales, falsos positivos)\n\n'
+        '- "audit_stats": resumen de estadisticas de auditoria (llamadas totales, falsos positivos)\n'
+        '- "blacklist_stats": total de intentos de fraude/voces reportadas a la lista negra\n\n'
         f"Contexto actual del analisis:\n"
         f"- Riesgo IA global: {payload.overall_risk_ai:.1f}%\n"
         f"- Probabilidad maxima de IA: {payload.max_ai_prob:.1f}%\n"
@@ -677,6 +678,66 @@ def get_logs_endpoint():
     Retorna el historial ordenado de llamadas analizadas para la tabla de administración.
     """
     return load_logs()
+
+class BlacklistReportRequest(BaseModel):
+    audio_path: Optional[str] = None
+    label: Optional[str] = None
+    overall_risk_ai: float = 0.0
+    max_ai_prob: float = 0.0
+    reporter_note: Optional[str] = None
+
+@app.post("/blacklist/report", summary="Reportar Voz Sospechosa a la Lista Negra")
+def report_to_blacklist(payload: BlacklistReportRequest, db: Session = Depends(database.get_db)):
+    """
+    Registra un intento de fraude (voz sintética de alto riesgo) en la lista negra
+    y regresa el conteo total actualizado de intentos reportados.
+    """
+    entry = models.BlacklistReport(
+        audio_path=payload.audio_path,
+        label=payload.label,
+        overall_risk_ai=payload.overall_risk_ai,
+        max_ai_prob=payload.max_ai_prob,
+        reporter_note=payload.reporter_note,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+
+    total_reports = db.query(models.BlacklistReport).count()
+
+    return {
+        "status": "success",
+        "message": "Voz registrada en la lista negra de intentos de fraude.",
+        "report_id": entry.id,
+        "total_reports": total_reports,
+    }
+
+@app.get("/blacklist/stats", summary="Total de Intentos de Engaño Reportados")
+def get_blacklist_stats(db: Session = Depends(database.get_db)):
+    """
+    Retorna el conteo total de voces reportadas a la lista negra, para el widget
+    'Total de Intentos de Engaño' del panel GenUI.
+    """
+    total_reports = db.query(models.BlacklistReport).count()
+    latest = (
+        db.query(models.BlacklistReport)
+        .order_by(models.BlacklistReport.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    return {
+        "total_reports": total_reports,
+        "recent": [
+            {
+                "id": r.id,
+                "audio_path": r.audio_path,
+                "label": r.label,
+                "overall_risk_ai": r.overall_risk_ai,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in latest
+        ],
+    }
 
 @app.post("/report-false-positive", summary="Reportar Falso Positivo")
 def report_false_positive_endpoint(payload: FalsePositiveRequest):
