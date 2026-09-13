@@ -104,16 +104,8 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
   void _initSpeech() async {
     try {
       await _speech.initialize(
-        onStatus: (val) {
-          if ((val == 'done' || val == 'notListening') && _isListening) {
-            _stopListeningAndAnalyze();
-          }
-        },
-        onError: (val) {
-          if (_isListening) {
-            _stopListeningAndAnalyze();
-          }
-        },
+        onStatus: (val) {},
+        onError: (val) {},
       );
     } catch (_) {}
   }
@@ -185,13 +177,20 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
       if (await _audioRecorder.hasPermission()) {
         externalDevice = await _pickExternalInputDevice();
 
+        // Verificar el codificador soportado por el hardware móvil
+        AudioEncoder encoder = AudioEncoder.wav;
+        if (!await _audioRecorder.isEncoderSupported(AudioEncoder.wav)) {
+          encoder = AudioEncoder.aacLc;
+        }
+
         final tempDir = await getTemporaryDirectory();
+        final ext = (encoder == AudioEncoder.wav) ? 'wav' : 'm4a';
         _recordedAudioPath =
-            '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.wav';
+            '${tempDir.path}/gear_audio_${DateTime.now().millisecondsSinceEpoch}.$ext';
 
         await _audioRecorder.start(
           RecordConfig(
-            encoder: AudioEncoder.wav,
+            encoder: encoder,
             sampleRate: 16000,
             numChannels: 1,
             device: externalDevice,
@@ -205,9 +204,6 @@ class _MobileDetectorScreenState extends State<MobileDetectorScreen>
     }
 
     // SpeechToText para transcripción en pantalla sólo si hay un micrófono externo.
-    // En el micrófono integrado de un teléfono móvil físico (externalDevice == null),
-    // omitimos _speech.listen() porque el SpeechRecognizer nativo de Android/iOS
-    // solicita acceso exclusivo a AudioRecord y bloquea la captura de _audioRecorder.
     if (externalDevice != null) {
       try {
         bool available = await _speech.initialize(
