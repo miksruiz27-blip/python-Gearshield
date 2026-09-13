@@ -371,6 +371,13 @@ async def detect_endpoint(request: Request):
     else:
         caller_audio = data
 
+    # Remuestrear a 16kHz: analyze_audio() asume 16kHz cuando recibe un array
+    # en lugar de una ruta de archivo, y el juez envía WAV a 8kHz.
+    target_sr = 16000
+    if sr != target_sr:
+        import librosa
+        caller_audio = librosa.resample(caller_audio, orig_sr=sr, target_sr=target_sr)
+
     # Ejecutar motor de inferencia biofísica
     analysis = analyze_audio(caller_audio, engine=model, scaler=scaler)
 
@@ -383,13 +390,10 @@ async def detect_endpoint(request: Request):
     # Veredicto de IA sintética vs Humano
     is_synthetic = bool(overall_risk >= 50.0 or max_ai_prob >= 60.0)
 
-    # Calibración de confianza entre 0.0 y 1.0
-    if is_synthetic:
-        raw_conf = max(overall_risk, max_ai_prob) / 100.0
-    else:
-        raw_conf = (100.0 - overall_risk) / 100.0
-
-    confidence = float(round(max(0.50, min(0.99, raw_conf)), 2))
+    # confidence = P(sintetico), score monotono para que el AUC del juez
+    # sea coherente entre llamadas humanas y sinteticas (no "certeza del veredicto").
+    raw_conf = max(overall_risk, max_ai_prob) / 100.0
+    confidence = float(round(max(0.01, min(0.99, raw_conf)), 2))
 
     return {
         "is_synthetic": is_synthetic,
